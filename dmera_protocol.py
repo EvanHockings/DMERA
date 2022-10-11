@@ -776,6 +776,7 @@ if MAIN:
     reset_count = 1
     sample_number = 12
     shots = 10**5
+    backend_name = "aer"
     # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     energy_list = [-1.24212, -1.26774, -1.27297]
     # Estimate the energy for each depth
@@ -784,7 +785,14 @@ if MAIN:
     for d in d_list:
         layer_theta = get_theta_evenbly(d)
         (energy_mean, energy_sem) = estimate_energy(
-            n, d, layer_theta, sample_number, shots, reset_time, reset_count
+            n,
+            d,
+            layer_theta,
+            sample_number,
+            shots,
+            reset_time,
+            reset_count,
+            backend_name,
         )
         energy_means.append(energy_mean)
         energy_sems.append(energy_sem)
