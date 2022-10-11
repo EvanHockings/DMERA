@@ -2,6 +2,7 @@
 
 import math
 import random
+import numpy as np
 from copy import deepcopy
 from time import time
 from typing import Optional, Union
@@ -262,7 +263,7 @@ def dmera_reset(
 # %%
 
 
-def get_backend(backend_name: str = "aer") -> AerSimulator:
+def get_backend(backend_name: str = "aer"):
     """
     Args:
         backend_name: A Qiskit backend name
@@ -277,6 +278,9 @@ def get_backend(backend_name: str = "aer") -> AerSimulator:
     return backend
 
 
+# %%
+
+
 def w(param: Parameter) -> QuantumCircuit:
     """
     Args:
@@ -289,8 +293,8 @@ def w(param: Parameter) -> QuantumCircuit:
     w_gate.cz(0, 1)
     w_gate.sdg([0, 1])
     w_gate.h([0, 1])
-    w_gate.rz(-param + math.pi / 2, 0)
-    w_gate.rz(-param, 1)
+    w_gate.rz(param - math.pi / 2, 0)
+    w_gate.rz(param, 1)
     w_gate.h([0, 1])
     w_gate.s([0, 1])
     w_gate.cz(0, 1)
@@ -310,8 +314,8 @@ def u(param: Parameter) -> QuantumCircuit:
     u_gate.cz(0, 1)
     u_gate.sdg([0, 1])
     u_gate.h([0, 1])
-    u_gate.rz(-param, 0)
-    u_gate.rz(-param, 1)
+    u_gate.rz(param, 0)
+    u_gate.rz(param, 1)
     u_gate.h([0, 1])
     u_gate.s([0, 1])
     u_gate.cz(0, 1)
@@ -319,7 +323,7 @@ def u(param: Parameter) -> QuantumCircuit:
     return u_gate
 
 
-def q(backend: AerSimulator) -> QuantumCircuit:
+def q(backend) -> QuantumCircuit:
     """
     Args:
         backend: A Qiskit backend
@@ -381,7 +385,7 @@ def generate_dmera_reset(
     q_gate: QuantumCircuit,
     reset_count: int = 1,
     barriers: bool = False,
-    reverse_gate: bool = False,
+    reverse_gate: bool = True,
 ) -> QuantumCircuit:
     """
     Args:
@@ -393,6 +397,8 @@ def generate_dmera_reset(
         theta_dict: Dictonary of Qiskit parameters for each layer, indexed by the layer and gate
         resets: Qubits which are reset in each layer
         reset_map: Reset mappings for the qubits upon which the gates in each layer act
+        inverse_map: Inverse mapping for the qubit reset mapping
+        q_gate: Qiskit circuit that prepares the initial state
         reset_count: Number of reset operations to perform a reset
         barriers: Add barriers to the circuit for ease of readability
         reverse_gate: For each gate, reverse which qubit is considered to be the 'first' on which the gate operates
@@ -460,7 +466,7 @@ def generate_dmera_reset(
 def generate_transverse_ising_circuits(
     n: int,
     d: int,
-    backend: AerSimulator,
+    backend,
     reset_time: Optional[int] = None,
     reset_count: int = 1,
 ) -> tuple[
@@ -560,7 +566,7 @@ def get_theta_evenbly(d: int) -> list[float]:
     Returns:
         theta_evenbly: Angles supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     """
-    theta_evenbly_2 = [math.pi / 12, math.pi / 12]  # -math.pi/6
+    theta_evenbly_2 = [math.pi / 12, -math.pi / 6]
     theta_evenbly_4 = [
         0.276143653403021,
         0.950326554644286,
@@ -593,7 +599,7 @@ def get_theta_evenbly(d: int) -> list[float]:
 
 def estimate_site_energy(
     n: int,
-    backend: AerSimulator,
+    backend,
     sample_number: int,
     shots: int,
     quantum_circuits: dict[
@@ -604,72 +610,127 @@ def estimate_site_energy(
     ],
     theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
     theta_values: dict[Parameter, float],
-):
+) -> tuple[list[float], list[float]]:
     """
     Args:
-
+        n: Number of scales
+        backend: A Qiskit backend
+        sample_number: Number of sites to sample the energy from
+        shots: Number of shots to measure for each circuit
+        quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
+        pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
+        theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
+        theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
     Returns:
-        sites_energy:
+        sites_energy: Mean energy for each site
+        sites_energy_sem: Energy standard error of the mean for each site
     """
-    # Generate random sites and determine the energies for each site
+    # Generate random sites and determine the supports for each site
     qubits = 3 * 2**n
-    sites = random.sample(range(qubits), sample_number)
-    sites_energy: list[list[float]] = []
-    for site in sites:
-        site_supports: list[Union[tuple[int, int], tuple[int, int, int]]] = [
+    sites = sorted(random.sample(range(qubits), sample_number))
+    sites_supports: list[list[Union[tuple[int, int], tuple[int, int, int]]]] = [
+        [
             ((site - 1) % qubits, (site + 0) % qubits, (site + 1) % qubits),
             ((site - 1) % qubits, (site + 0) % qubits),
             ((site + 0) % qubits, (site + 1) % qubits),
         ]
-        # Bind the circuit parameters
-        bound_circuits: list[QuantumCircuit] = []
-        for site_support in site_supports:
-            theta_values_pcc: dict[Parameter, float] = {
-                theta_dict[(layer_index, gate)]: theta_values[
-                    theta_dict[(layer_index, gate)]
-                ]
-                for (layer_index, layer) in enumerate(pcc_circuits[site_support])
-                for gate in layer
-            }
-            bound_circuits.append(
-                quantum_circuits[site_support]
-                .decompose()
-                .bind_parameters(theta_values_pcc)
-            )
-        # Transpile the circuits
-        site_circuits = transpile(
-            bound_circuits,
-            backend=backend,
-            optimization_level=0,
+        for site in sites
+    ]
+    flattened_supports: list[Union[tuple[int, int], tuple[int, int, int]]] = sorted(
+        list(set([support for supports in sites_supports for support in supports]))
+    )
+    # Bind the parameters for the circuits
+    bound_circuits: list[QuantumCircuit] = []
+    for site_support in flattened_supports:
+        theta_values_pcc: dict[Parameter, float] = {
+            theta_dict[(layer_index, gate)]: theta_values[
+                theta_dict[(layer_index, gate)]
+            ]
+            for (layer_index, layer) in enumerate(pcc_circuits[site_support])
+            for gate in layer
+        }
+        bound_circuits.append(
+            quantum_circuits[site_support].decompose().bind_parameters(theta_values_pcc)
         )
-        # Run the circuits
-        start_time = time()
-        job = backend.run(site_circuits, shots=shots)
-        job_results = job.result().get_counts()
-        counts: list[dict[str, int]] = [dict(count) for count in job_results]
-        end_time = time()
-        print(f"Running the circuits for site {site} took {end_time - start_time} s.")
-        site_operator_values = [
-            sum(
-                ((-1) ** (sum(int(bit) for bit in key) % 2)) * count[key]
-                for key in count.keys()
+    # Transpile the circuits
+    site_circuits = transpile(
+        bound_circuits,
+        backend=backend,
+        optimization_level=0,
+    )
+    # Run the circuits
+    start_time = time()
+    job = backend.run(site_circuits, shots=shots)
+    job_results = job.result().get_counts()
+    counts: list[dict[str, int]] = [dict(count) for count in job_results]
+    end_time = time()
+    print(
+        f"Running the circuits for {sample_number} sites took {end_time - start_time} s.\n"
+    )
+    # Calculate the value of the operators from the circuit data
+    support_operators = [
+        sum(
+            (1 - 2 * (sum(int(bit) for bit in key) % 2)) * count[key]
+            for key in count.keys()
+        )
+        / shots
+        for count in counts
+    ]
+    # Determine the energy at each of the sites
+    sites_energy: list[float] = []
+    sites_energy_sem: list[float] = []
+    for site_index in range(sample_number):
+        site_operators = [
+            support_operators[flattened_supports.index(site_support)]
+            for site_support in sites_supports[site_index]
+        ]
+        energy = site_operators[0] - 0.5 * (site_operators[1] + site_operators[2])
+        energy_sem = math.sqrt(
+            (
+                (1 + site_operators[0]) * (1 - site_operators[0])
+                + 0.25
+                * (
+                    (1 + site_operators[1]) * (1 - site_operators[1])
+                    + (1 + site_operators[2]) * (1 - site_operators[2])
+                )
             )
             / shots
-            for count in counts
-        ]
-        sites_energy.append(site_operator_values)
-    return sites_energy
+        )
+        sites_energy.append(energy)
+        sites_energy_sem.append(energy_sem)
+    return (sites_energy, sites_energy_sem)
 
 
 # %%
 
-if MAIN:
-    n = 2
-    d = 2
-    theta_evenbly = get_theta_evenbly(d)
-    reset_time = None
-    reset_count = 1
-    backend = get_backend()
+
+def estimate_energy(
+    n: int,
+    d: int,
+    layer_theta: list[float],
+    sample_number: int,
+    shots: int,
+    reset_time: Optional[int] = None,
+    reset_count: int = 1,
+    backend_name: str = "aer",
+) -> tuple[float, float]:
+    """
+    Args:
+        n: Number of scales
+        d: Depth at each scale
+        layer_theta: Theta values for the layers in each scale
+        sample_number: Number of sites to sample the energy from
+        shots: Number of shots to measure for each circuit
+        reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
+        reset_count: Number of reset operations to perform a reset
+        backend_name: A Qiskit backend name
+    Returns:
+        energy_mean: Energy per site mean
+        energy_sem: Energy per site standard error of the mean
+    """
+    # Get some parameters
+    backend = get_backend(backend_name)
+    # Generate the circuits
     (
         quantum_circuits,
         pcc_circuits,
@@ -678,14 +739,9 @@ if MAIN:
     ) = generate_transverse_ising_circuits(n, d, backend, reset_time, reset_count)
     # Set the theta values
     for (layer_index, gate) in theta_dict.keys():
-        theta_values[theta_dict[(layer_index, gate)]] = theta_evenbly[layer_index % d]
-
-# %%
-
-if MAIN:
-    sample_number = 5
-    shots = 10**4
-    sites_energy = estimate_site_energy(
+        theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
+    # Estimate the energy of the sites
+    (sites_energy, sites_energy_sem) = estimate_site_energy(
         n,
         backend,
         sample_number,
@@ -695,125 +751,57 @@ if MAIN:
         theta_dict,
         theta_values,
     )
-    print(sites_energy)
-    abs_site_energy = [
-        -abs(site[0]) - 0.5 * (abs(site[1]) + abs(site[2])) for site in sites_energy
-    ]
-    site_energy = [site[0] + 0.5 * (site[1] + site[2]) for site in sites_energy]
-    site_sum = [sum(site) for site in sites_energy]
-    print(site_energy)
+    # Calculate the mean energy and SEM
+    energy_mean: float = np.mean(sites_energy).item()
+    energy_sem_shots = np.sqrt(
+        sum(np.array(sites_energy_sem) ** 2) / (len(sites_energy) ** 2)
+    )
+    energy_sem_sample_number = np.sqrt(np.var(sites_energy) / len(sites_energy))
+    energy_sem: float = np.sqrt(
+        energy_sem_shots**2 + energy_sem_sample_number**2
+    ).item()
+    print(
+        f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}.\n"
+    )
+    return (energy_mean, energy_sem)
 
 
 # %%
 
 if MAIN:
-    # support_example = (2, 3, 4)
-    support_example = (3, 4)
-    quantum_example = transpile(
-        quantum_circuits[support_example].decompose(),
-        backend=backend,
-        optimization_level=1,
-    )
-    pcc_example = pcc_circuits[support_example]
-    # Filter the dictionary for binding the parameters
-    theta_pcc_values: dict[Parameter, float] = {
-        theta_dict[(layer_index, gate)]: theta_values[theta_dict[(layer_index, gate)]]
-        for (layer_index, layer) in enumerate(pcc_example)
-        for gate in layer
-    }
-    transpiled_example = transpile(
-        quantum_example.bind_parameters(theta_pcc_values),
-        backend=backend,
-        optimization_level=1,
-    )
-    shots = 1000
-    start = time()
-    job = backend.run(transpiled_example, shots=shots)
-    print(time() - start)
-    counts = job.result().get_counts()
-    print(time() - start)
-    op_val = 0
-    for key in counts.keys():
-        if sum(int(bit) for bit in key) % 2 == 0:
-            op_val += counts[key]
-        else:
-            op_val -= counts[key]
-    op_val /= shots
-    print(op_val)
-
-# %%
-
-# TODO: Reorganise this!
-
-
-def dmera_protocol(
-    quantum_circuits: dict[
-        Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit
-    ],
-    theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
-    theta_values: dict[Parameter, float],
-    backend_name: str,
-    optimization_level: int = 1,
-):
-    pass
-    # # Get IBMQ backend
-    # provider = IBMQ.load_account()
-    # backend = provider.get_backend(backend_name)
-    # # Cache previously transpiled circuits to save on transpiling costs
-    # transpiled_circuits: dict[
-    #     Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit
-    # ] = {}
-    # # Transpile a circuit
-    # transpiled_circuit: list[QuantumCircuit] = transpile(
-    #     quantum_circuit, backend=backend, optimization_level=optimization_level
-    # )
-    # # Run a circuit
-    # job = backend.run(transpiled_circuit.bind_parameters(theta_values))
-    # retrieved_job = backend.retrieve_job(job.job_id())
-
-
-# %%
-
-if MAIN:
-    # Generate a set of quantum circuits
-    n = 5
-    d = 2
-    reset_time = 1
+    # Initialise parameters
+    n = 3
+    d_list = [2, 4, 5]
+    reset_time = None
     reset_count = 1
-    (
-        quantum_circuits,
-        pcc_circuits,
-        theta_dict,
-        theta_values,
-    ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
-    # Transpile an example circuit for a device and draw it
-    provider = IBMQ.load_account()
-    backend_name = "ibm_oslo"
-    backend = provider.get_backend(backend_name)
-    support_example = (0, 1, 2)
-    quantum_example = quantum_circuits[support_example]
-    pcc_example = pcc_circuits[support_example]
-    transpiled_example = transpile(
-        quantum_example.decompose(), backend=backend, optimization_level=3
-    )
+    sample_number = 12
+    shots = 10**5
+    # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
+    energy_list = [-1.24212, -1.26774, -1.27297]
+    # Estimate the energy for each depth
+    energy_means: list[float] = []
+    energy_sems: list[float] = []
+    for d in d_list:
+        layer_theta = get_theta_evenbly(d)
+        (energy_mean, energy_sem) = estimate_energy(
+            n, d, layer_theta, sample_number, shots, reset_time, reset_count
+        )
+        energy_means.append(energy_mean)
+        energy_sems.append(energy_sem)
+    # Store if the energy mean is within k SEMs of the true value
+    k = 2
+    d_passes: list[bool] = [
+        True
+        if (
+            energy_means[index] - k * energy_sems[index] < energy_list[index]
+            and energy_means[index] + k * energy_sems[index] > energy_list[index]
+        )
+        else False
+        for index in range(len(d_list))
+    ]
     print(
-        f"This is a transpiled example circuit for the observable supported on {support_example} without bound parameters:"
+        f"The estimated energies are all within {k} standard errors of the mean of the true energies: {any(d_passes)}."
     )
-    display(transpiled_example.draw(output="mpl"))
-    # Filter the dictionary for binding the parameters and draw the bound circuit
-    theta_pcc_values: dict[Parameter, float] = {
-        theta_dict[(layer_index, gate)]: theta_values[theta_dict[(layer_index, gate)]]
-        for (layer_index, layer) in enumerate(pcc_example)
-        for gate in layer
-    }
-    print(
-        f"This is a transpiled example circuit for the observable supported on {support_example} with bound parameters:"
-    )
-    bound_example = transpile(
-        transpiled_example.bind_parameters(theta_pcc_values),
-        backend=backend,
-        optimization_level=3,
-    )
-    display(bound_example.draw(output="mpl"))
+
 
 # %%
