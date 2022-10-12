@@ -5,11 +5,10 @@ import random
 import numpy as np
 from copy import deepcopy
 from time import time
-from typing import Optional, Union
-from qiskit import IBMQ, ClassicalRegister, QuantumRegister, QuantumCircuit
+from typing import Optional, Union, Any
+from qiskit import IBMQ, ClassicalRegister, QuantumRegister, QuantumCircuit, Aer
 from qiskit.circuit import Parameter
 from qiskit.compiler import transpile
-from qiskit_aer import AerSimulator
 
 MAIN = __name__ == "__main__"
 
@@ -137,8 +136,8 @@ def dmera_reset(
     circuit: list[list[tuple[int, int]]],
     sites_list: list[list[int]],
     support: list[int],
-    reset_time: Optional[int] = None,
-    reset_count: int = 1,
+    reset_time: Optional[int],
+    reset_count: int,
 ) -> tuple[
     list[list[tuple[int, int]]],
     list[list[int]],
@@ -263,24 +262,6 @@ def dmera_reset(
 # %%
 
 
-def get_backend(backend_name: str = "aer"):
-    """
-    Args:
-        backend_name: A Qiskit backend name
-    Returns:
-        backend: A Qiskit backend
-    """
-    if backend_name == "aer":
-        backend = AerSimulator(method="automatic")
-    else:
-        provider = IBMQ.load_account()
-        backend = provider.get_backend(backend_name)
-    return backend
-
-
-# %%
-
-
 def w(param: Parameter) -> QuantumCircuit:
     """
     Args:
@@ -323,10 +304,8 @@ def u(param: Parameter) -> QuantumCircuit:
     return u_gate
 
 
-def q(backend) -> QuantumCircuit:
+def q() -> QuantumCircuit:
     """
-    Args:
-        backend: A Qiskit backend
     Returns:
         q_gate: A Qiskit circuit representing the q initialisation gate
     """
@@ -342,7 +321,11 @@ def q(backend) -> QuantumCircuit:
         0.0,
     ]
     q_gate.initialize(init_state, [0, 1, 2])
-    q_gate = transpile(q_gate.decompose(), backend=backend, optimization_level=3)
+    q_gate = transpile(
+        q_gate.decompose(),
+        backend=Aer.get_backend("aer_simulator_statevector"),
+        optimization_level=3,
+    )
     return q_gate
 
 
@@ -383,7 +366,7 @@ def generate_dmera_reset(
     reset_map: dict[tuple[int, int], int],
     inverse_map: dict[int, int],
     q_gate: QuantumCircuit,
-    reset_count: int = 1,
+    reset_count: int,
     barriers: bool = False,
     reverse_gate: bool = True,
 ) -> QuantumCircuit:
@@ -466,9 +449,8 @@ def generate_dmera_reset(
 def generate_transverse_ising_circuits(
     n: int,
     d: int,
-    backend,
-    reset_time: Optional[int] = None,
-    reset_count: int = 1,
+    reset_time: Optional[int],
+    reset_count: int,
 ) -> tuple[
     dict[Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit],
     dict[Union[tuple[int, int], tuple[int, int, int]], list[list[tuple[int, int]]]],
@@ -479,7 +461,6 @@ def generate_transverse_ising_circuits(
     Args:
         n: Number of scales
         d: Depth at each scale
-        backend: A Qiskit backend
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
     Returns:
@@ -493,7 +474,7 @@ def generate_transverse_ising_circuits(
     qubits = 3 * 2**n
     (circuit, sites_list) = dmera(n, d)
     (theta_dict, theta_values) = generate_params(circuit)
-    q_gate = q(backend)
+    q_gate = q()
     assert L == len(circuit)
     # Generate the supports
     two_qubit_supports = [[(i + 0) % qubits, (i + 1) % qubits] for i in range(qubits)]
@@ -551,7 +532,7 @@ def generate_transverse_ising_circuits(
         pcc_circuits[tuple(support)] = pcc_circuit
     # Print a diagnostic
     print(
-        f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}.\n"
+        f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
     )
     return (quantum_circuits, pcc_circuits, theta_dict, theta_values)
 
@@ -599,7 +580,6 @@ def get_theta_evenbly(d: int) -> list[float]:
 
 def estimate_site_energy(
     n: int,
-    backend,
     sample_number: int,
     shots: int,
     quantum_circuits: dict[
@@ -610,17 +590,18 @@ def estimate_site_energy(
     ],
     theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
     theta_values: dict[Parameter, float],
+    transpile_kwargs: dict[str, Any],
 ) -> tuple[list[float], list[float]]:
     """
     Args:
         n: Number of scales
-        backend: A Qiskit backend
         sample_number: Number of sites to sample the energy from
         shots: Number of shots to measure for each circuit
         quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
         pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
         theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
         theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
+        transpile_kwargs: Keyword arguments for circuit transpiling
     Returns:
         sites_energy: Mean energy for each site
         sites_energy_sem: Energy standard error of the mean for each site
@@ -653,11 +634,7 @@ def estimate_site_energy(
             quantum_circuits[site_support].decompose().bind_parameters(theta_values_pcc)
         )
     # Transpile the circuits
-    site_circuits = transpile(
-        bound_circuits,
-        backend=backend,
-        optimization_level=0,
-    )
+    site_circuits = transpile(bound_circuits, **transpile_kwargs)
     # Run the circuits
     start_time = time()
     job = backend.run(site_circuits, shots=shots)
@@ -665,7 +642,7 @@ def estimate_site_energy(
     counts: list[dict[str, int]] = [dict(count) for count in job_results]
     end_time = time()
     print(
-        f"Running the circuits for {sample_number} sites took {end_time - start_time} s.\n"
+        f"Running the circuits for {sample_number} sites took {end_time - start_time} s."
     )
     # Calculate the value of the operators from the circuit data
     support_operators = [
@@ -710,9 +687,9 @@ def estimate_energy(
     layer_theta: list[float],
     sample_number: int,
     shots: int,
-    reset_time: Optional[int] = None,
-    reset_count: int = 1,
-    backend_name: str = "aer",
+    reset_time: Optional[int],
+    reset_count: int,
+    transpile_kwargs: dict[str, Any],
 ) -> tuple[float, float]:
     """
     Args:
@@ -723,33 +700,31 @@ def estimate_energy(
         shots: Number of shots to measure for each circuit
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
-        backend_name: A Qiskit backend name
+        transpile_kwargs: Keyword arguments for circuit transpiling
     Returns:
         energy_mean: Energy per site mean
         energy_sem: Energy per site standard error of the mean
     """
-    # Get some parameters
-    backend = get_backend(backend_name)
     # Generate the circuits
     (
         quantum_circuits,
         pcc_circuits,
         theta_dict,
         theta_values,
-    ) = generate_transverse_ising_circuits(n, d, backend, reset_time, reset_count)
+    ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
     # Set the theta values
     for (layer_index, gate) in theta_dict.keys():
         theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
     # Estimate the energy of the sites
     (sites_energy, sites_energy_sem) = estimate_site_energy(
         n,
-        backend,
         sample_number,
         shots,
         quantum_circuits,
         pcc_circuits,
         theta_dict,
         theta_values,
+        transpile_kwargs,
     )
     # Calculate the mean energy and SEM
     energy_mean: float = np.mean(sites_energy).item()
@@ -761,7 +736,7 @@ def estimate_energy(
         energy_sem_shots**2 + energy_sem_sample_number**2
     ).item()
     print(
-        f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}.\n"
+        f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}."
     )
     return (energy_mean, energy_sem)
 
@@ -769,14 +744,37 @@ def estimate_energy(
 # %%
 
 if MAIN:
+    """
+    Suggested parameter values:
+        n: 3 (4 or even higher might be preferable)
+        d_list: [2, 4, 5]
+        reset_time: None or [The amount of time it takes to perform reset in comparison to a u(theta) or w(theta) gate]
+            (to avoid waiting for reset operations to complete)
+        reset_count: [Number of times to perform the reset operation]
+            (more reset operations will produce a better reset)
+        sample_number: 12
+            (unsure if this value is good)
+        shots: 10**5 or 10**2
+            (the former gives accurate results, the latter is appropriate for simulations with reset)
+        backend_name: "aer_simulator_statevector" or "ibm_oslo"
+            (using a physical device like "ibm_oslo" may involve a very long wait, depending on queue times)
+        Note that circuits with reset take much longer to simulate than would seem reasonable, drastically limiting the number of shots we can take.
+        This should not be the case for actual quantum devices, however.
+    """
     # Initialise parameters
     n = 3
-    d_list = [2, 4, 5]
-    reset_time = None
+    d_list = [2]
+    reset_time = 1
     reset_count = 1
     sample_number = 12
-    shots = 10**5
-    backend_name = "aer"
+    shots = 10**2
+    backend_name = "aer_simulator_statevector"
+    if backend_name[0:3] == "aer":
+        backend = Aer.get_backend("aer_simulator_statevector")
+    else:
+        provider = IBMQ.load_account()
+        backend = provider.get_backend(backend_name)
+    transpile_kwargs: dict[str, Any] = {"backend": backend, "optimization_level": 3}
     # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     energy_list = [-1.24212, -1.26774, -1.27297]
     # Estimate the energy for each depth
@@ -792,23 +790,17 @@ if MAIN:
             shots,
             reset_time,
             reset_count,
-            backend_name,
+            transpile_kwargs,
         )
         energy_means.append(energy_mean)
         energy_sems.append(energy_sem)
-    # Store if the energy mean is within k SEMs of the true value
-    k = 2
-    d_passes: list[bool] = [
-        True
-        if (
-            energy_means[index] - k * energy_sems[index] < energy_list[index]
-            and energy_means[index] + k * energy_sems[index] > energy_list[index]
-        )
-        else False
+    # Calculate the z scores for the energies
+    energy_z_scores = [
+        (energy_means[index] - energy_list[index]) / energy_sems[index]
         for index in range(len(d_list))
     ]
     print(
-        f"The estimated energies are all within {k} standard errors of the mean of the true energies: {any(d_passes)}."
+        f"For depths {d_list} at each scale, the estimated energies are {energy_z_scores} standard errors of the mean away from the true energies."
     )
 
 
