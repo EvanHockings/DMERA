@@ -635,6 +635,7 @@ def estimate_site_energy(
         )
     # Transpile the circuits
     site_circuits = transpile(bound_circuits, **transpile_kwargs)
+    display(site_circuits[0].draw("mpl"))
     # Run the circuits
     start_time = time()
     job = backend.run(site_circuits, shots=shots)
@@ -764,17 +765,21 @@ if MAIN:
     # Initialise parameters
     n = 3
     d_list = [2]
-    reset_time = 1
+    reset_time = 3
     reset_count = 1
     sample_number = 12
-    shots = 10**2
-    backend_name = "aer_simulator_statevector"
+    shots = 10**4
+    backend_name = "aer"
     if backend_name[0:3] == "aer":
         backend = Aer.get_backend("aer_simulator_statevector")
     else:
         provider = IBMQ.load_account()
         backend = provider.get_backend(backend_name)
-    transpile_kwargs: dict[str, Any] = {"backend": backend, "optimization_level": 3}
+    transpile_kwargs: dict[str, Any] = {
+        "backend": backend,
+        "initial_layout": None,
+        "optimization_level": 3,
+    }
     # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     energy_list = [-1.24212, -1.26774, -1.27297]
     # Estimate the energy for each depth
