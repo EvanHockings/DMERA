@@ -2,13 +2,20 @@
 
 import math
 import random
+import mthree
 import numpy as np
+import mapomatic as mm
 from copy import deepcopy
 from time import time
 from typing import Optional, Union, Any
 from qiskit import IBMQ, ClassicalRegister, QuantumRegister, QuantumCircuit, Aer
 from qiskit.circuit import Parameter
 from qiskit.compiler import transpile
+from qiskit.transpiler import InstructionDurations, PassManager
+from qiskit.transpiler.basepasses import TransformationPass
+from qiskit.dagcircuit import DAGCircuit
+from qiskit.visualization.timeline import draw, IQXSimple, IQXStandard, IQXDebugging
+from qiskit.providers.fake_provider import FakeKolkata
 
 MAIN = __name__ == "__main__"
 
@@ -130,6 +137,55 @@ def used(
 # %%
 
 
+def track_reset(
+    qubits: int,
+    L: int,
+    reset_length: int,
+    start_use: list[int],
+    stop_use: list[int],
+    layer_index: int,
+    qubit_map: list[int],
+    resets: list[list[int]],
+    reset_in_progress: list[int],
+):
+    # Determine the qubits that can be reset
+    reset_qubits = [
+        qubit_index
+        for (qubit_index, stop_index) in enumerate(stop_use)
+        if stop_index == layer_index
+    ]
+    # Determine the qubits that reset qubits could be used to replace
+    reset_allocation_layers = [
+        [
+            qubit_index
+            for (qubit_index, start_index) in enumerate(start_use)
+            if start_index == future_layer_index
+            and qubit_index not in reset_in_progress
+        ]
+        for future_layer_index in range(layer_index + 1 + reset_length, L)
+    ]
+    # Randomly shuffle the layers
+    for layer in reset_allocation_layers:
+        random.shuffle(layer)
+    reset_allocation = [
+        qubit_index for layer in reset_allocation_layers for qubit_index in layer
+    ]
+    # Reset qubits and relabel them appropriately with the qubit map
+    reset: list[int] = []
+    for j in range(min(len(reset_qubits), len(reset_allocation))):
+        reset_qubit = reset_qubits[j]
+        paired_qubit = reset_allocation[j]
+        reset.append(qubit_map[reset_qubit])
+        reset_in_progress.append(paired_qubit)
+        qubit_map[paired_qubit] = qubit_map[reset_qubit]
+        qubit_map[reset_qubit] = qubits
+    resets.append(reset)
+    pass
+
+
+# %%
+
+
 def dmera_reset(
     n: int,
     d: int,
@@ -174,37 +230,18 @@ def dmera_reset(
     # Store the resets and the mapping on the qubits
     resets: list[list[int]] = []
     reset_map: dict[tuple[int, int], int] = {}
-    #################################################
-    # Determine the resets for the initialisation
-    #################################################
-    layer_index = -1
-    # Determine the qubits that can be reset
-    reset_qubits = [
-        qubit_index
-        for (qubit_index, stop_index) in enumerate(stop_use)
-        if stop_index == layer_index
-    ]
-    # Determine the qubits that reset qubits could be used to replace
-    reset_allocation_layers = [
-        [
-            qubit_index
-            for (qubit_index, start_index) in enumerate(start_use)
-            if start_index == future_layer_index
-        ]
-        for future_layer_index in range(layer_index + 1 + reset_length, L)
-    ]
-    # Flatten the reset qubits
-    reset_allocation = [
-        qubit_index for layer in reset_allocation_layers for qubit_index in layer
-    ]
-    # Reset qubits and relabel them appropriately with the qubit map
-    reset: list[int] = []
-    for j in range(min(len(reset_qubits), len(reset_allocation))):
-        reset.append(qubit_map[reset_qubits[j]])
-        reset_in_progress.append(reset_allocation[j])
-        qubit_map[reset_allocation[j]] = qubit_map[reset_qubits[j]]
-        qubit_map[reset_qubits[j]] = qubits
-    resets.append(reset)
+    # Track resets for initialisation
+    track_reset(
+        qubits,
+        L,
+        reset_length,
+        start_use,
+        stop_use,
+        -1,
+        qubit_map,
+        resets,
+        reset_in_progress,
+    )
     for qubit in sites_list[0]:
         reset_map[(-1, qubit)] = qubit_map[qubit]
     #################################################
@@ -219,36 +256,18 @@ def dmera_reset(
                 reset_in_progress.remove(gate[1])
             reset_map[(layer_index, gate[0])] = qubit_map[gate[0]]
             reset_map[(layer_index, gate[1])] = qubit_map[gate[1]]
-        # Determine the qubits that can be reset
-        reset_qubits = [
-            qubit_index
-            for (qubit_index, stop_index) in enumerate(stop_use)
-            if stop_index == layer_index
-        ]
-        # Determine the qubits that reset qubits could be used to replace
-        reset_allocation_layers = [
-            [
-                qubit_index
-                for (qubit_index, start_index) in enumerate(start_use)
-                if start_index == future_layer_index
-            ]
-            for future_layer_index in range(layer_index + 1 + reset_length, L)
-        ]
-        # Filter out the qubits currently being reset
-        reset_allocation = [
-            qubit_index
-            for layer in reset_allocation_layers
-            for qubit_index in layer
-            if qubit_index not in reset_in_progress
-        ]
-        # Reset qubits and relabel them appropriately with the qubit map
-        reset: list[int] = []
-        for j in range(min(len(reset_qubits), len(reset_allocation))):
-            reset.append(qubit_map[reset_qubits[j]])
-            reset_in_progress.append(reset_allocation[j])
-            qubit_map[reset_allocation[j]] = qubit_map[reset_qubits[j]]
-            qubit_map[reset_qubits[j]] = qubits
-        resets.append(reset)
+        # Track resets in the layer
+        track_reset(
+            qubits,
+            L,
+            reset_length,
+            start_use,
+            stop_use,
+            layer_index,
+            qubit_map,
+            resets,
+            reset_in_progress,
+        )
     #################################################
     # Generate the inverse map
     #################################################
@@ -414,8 +433,10 @@ def generate_dmera_reset(
             # Determine the appropriate gate
             if layer_index % d == 0:
                 custom_gate = w(theta_dict[(layer_index, gate)]).to_gate()
+
             else:
                 custom_gate = u(theta_dict[(layer_index, gate)]).to_gate()
+
             # Append the gate to the circuit
             if reverse_gate:
                 quantum_circuit.append(
@@ -451,6 +472,7 @@ def generate_transverse_ising_circuits(
     d: int,
     reset_time: Optional[int],
     reset_count: int,
+    print_diagnostics: bool = False,
 ) -> tuple[
     dict[Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit],
     dict[Union[tuple[int, int], tuple[int, int, int]], list[list[tuple[int, int]]]],
@@ -463,6 +485,7 @@ def generate_transverse_ising_circuits(
         d: Depth at each scale
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
+        print_diagnostics: Print diagnostics for the circuit generation
     Returns:
         quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
         pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
@@ -514,26 +537,28 @@ def generate_transverse_ising_circuits(
         assert num_qubits == quantum_circuit.num_qubits
         qubit_numbers.append(num_qubits)
         # Add the appropriate measurements
+        support_mapped = [inverse_map[reset_map[(L - 1, qubit)]] for qubit in support]
         if len(support) == 2:
-            quantum_circuit.h(inverse_map[reset_map[(L - 1, support[0])]])
-            quantum_circuit.h(inverse_map[reset_map[(L - 1, support[1])]])
-            quantum_circuit.measure(inverse_map[reset_map[(L - 1, support[0])]], 0)
-            quantum_circuit.measure(inverse_map[reset_map[(L - 1, support[1])]], 1)
+            quantum_circuit.h(support_mapped[0])
+            quantum_circuit.h(support_mapped[1])
+            quantum_circuit.measure(support_mapped[0], 0)
+            quantum_circuit.measure(support_mapped[1], 1)
         elif len(support) == 3:
-            quantum_circuit.h(inverse_map[reset_map[(L - 1, support[0])]])
-            quantum_circuit.h(inverse_map[reset_map[(L - 1, support[2])]])
-            quantum_circuit.measure(inverse_map[reset_map[(L - 1, support[0])]], 0)
-            quantum_circuit.measure(inverse_map[reset_map[(L - 1, support[1])]], 1)
-            quantum_circuit.measure(inverse_map[reset_map[(L - 1, support[2])]], 2)
+            quantum_circuit.h(support_mapped[0])
+            quantum_circuit.h(support_mapped[2])
+            quantum_circuit.measure(support_mapped[0], 0)
+            quantum_circuit.measure(support_mapped[1], 1)
+            quantum_circuit.measure(support_mapped[2], 2)
         else:
             raise ValueError
         # Add the circuit to the dictionary
         quantum_circuits[tuple(support)] = quantum_circuit
         pcc_circuits[tuple(support)] = pcc_circuit
     # Print a diagnostic
-    print(
-        f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
-    )
+    if print_diagnostics:
+        print(
+            f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
+        )
     return (quantum_circuits, pcc_circuits, theta_dict, theta_values)
 
 
@@ -635,7 +660,6 @@ def estimate_site_energy(
         )
     # Transpile the circuits
     site_circuits = transpile(bound_circuits, **transpile_kwargs)
-    display(site_circuits[0].draw("mpl"))
     # Run the circuits
     start_time = time()
     job = backend.run(site_circuits, shots=shots)
@@ -744,6 +768,184 @@ def estimate_energy(
 
 # %%
 
+
+class RemoveDelays(TransformationPass):
+    """
+    Return a circuit with any delays removed.
+    This transformation is not semantics preserving.
+    """
+
+    def run(self, dag: DAGCircuit) -> DAGCircuit:
+        """
+        Run the RemoveDelays pass on `dag`.
+        """
+        dag.remove_all_ops_named("delay")
+        return dag
+
+
+# %%
+
+if MAIN:
+    # Simulator parameters
+    simulator_backend = Aer.get_backend("aer_simulator")
+    simulator_kwargs: dict[str, Any] = {
+        "backend": simulator_backend,
+        "optimization_level": 3,
+    }
+    # Device parameters
+    is_real = True
+    if is_real:
+        device_name = "ibm_oslo"
+        provider = IBMQ.load_account()
+        device_backend = provider.get_backend(device_name)
+    else:
+        device_backend = FakeKolkata()
+    device_kwargs: dict[str, Any] = {
+        "backend": device_backend,
+        "scheduling_method": "alap",
+        "layout_method": "sabre",
+        "routing_method": "sabre",
+        "optimization_level": 3,
+    }
+
+# %%
+
+
+if MAIN:
+    # Set the parameters
+    n = 3
+    d = 2
+    reset_time = 1
+    reset_count = 1
+    shots = 10**4
+    layer_theta = get_theta_evenbly(d)
+    support = (3, 4, 5)
+    k_reset = 10
+    k_transpile = 20
+    run_circuit = False
+    # Generate circuits
+    (
+        quantum_circuits,
+        pcc_circuits,
+        theta_dict,
+        theta_values,
+    ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
+    # Set the theta values
+    for (layer_index, gate) in theta_dict.keys():
+        theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
+    # Bind the parameters for the `support` pcc circuit
+    theta_values_pcc: dict[Parameter, float] = {
+        theta_dict[(layer_index, gate)]: theta_values[theta_dict[(layer_index, gate)]]
+        for (layer_index, layer) in enumerate(pcc_circuits[support])
+        for gate in layer
+    }
+    circuit = quantum_circuits[support].decompose().bind_parameters(theta_values_pcc)
+    # Transpile the simulator circuit
+    simulator_circuit = transpile(circuit, **simulator_kwargs)
+    # Transpile the device circuit
+    # device_circuits = transpile([circuit]*k_transpile, **device_kwargs)
+    # Testing random circuit generation
+    # If this is worthwhile I can rework my code to make it much more efficient
+    circuit_list: list[QuantumCircuit] = []
+    for idx in range(k_reset):
+        (
+            quantum_circuits,
+            pcc_circuits,
+            theta_dict,
+            theta_values,
+        ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
+        # Set the theta values
+        for (layer_index, gate) in theta_dict.keys():
+            theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
+        # Bind the parameters for the `support` pcc circuit
+        theta_values_pcc: dict[Parameter, float] = {
+            theta_dict[(layer_index, gate)]: theta_values[
+                theta_dict[(layer_index, gate)]
+            ]
+            for (layer_index, layer) in enumerate(pcc_circuits[support])
+            for gate in layer
+        }
+        circuit_list.append(
+            quantum_circuits[support].decompose().bind_parameters(theta_values_pcc)
+        )
+    device_circuits = transpile(circuit_list * k_transpile, **device_kwargs)
+    # Choose the shortest of the k circuits
+    durations: list[int] = [
+        device_circuit.duration for device_circuit in device_circuits
+    ]
+    cx_counts: list[int] = [
+        len(device_circuit.get_instructions("cx")) for device_circuit in device_circuits
+    ]
+    duration_order: np.ndarray = np.argsort(durations)
+    min_duration_arg = np.argmin(durations)
+    min_cx_arg = np.argmin(cx_counts)
+    best_arg = duration_order[np.argmin(np.array(cx_counts)[duration_order][0:k_reset])]
+    print(
+        f"The circuit with the minimum duration {durations[min_duration_arg]} has {cx_counts[min_duration_arg]} CX gates, the circuit with the minimum CX gates {cx_counts[min_cx_arg]} has duration {durations[min_cx_arg]}, and the chosen best circuit has duration {durations[best_arg]} and {cx_counts[best_arg]} CX gates."
+    )
+    short_circuit = device_circuits[best_arg]
+    # Remove delays
+    remove_delays = PassManager(RemoveDelays())
+    deflated_circuit = mm.deflate_circuit(remove_delays.run(short_circuit))
+    # Use mapomatic to determine the optimal layout
+    best_layout = mm.best_overall_layout(deflated_circuit, device_backend)
+    device_circuit = transpile(
+        deflated_circuit, initial_layout=best_layout[0], **device_kwargs
+    )
+    # Display the circuit
+    display(
+        draw(
+            device_circuit,
+            plotter="mpl",
+            style=IQXSimple(**{"formatter.general.fig_width": 40}),
+        )
+    )
+    print(
+        f"The circuit duration is {device_circuit.duration}, which should not be much longer than the duration of the circuit before transpilation {short_circuit.duration}."
+    )
+    # Run the simulator circuit
+    start_time = time()
+    job = simulator_backend.run(simulator_circuit, shots=shots)
+    simulator_counts = dict(job.result().get_counts())
+    simulator_operator_value = (
+        sum(
+            (1 - 2 * (sum(int(bit) for bit in key) % 2)) * simulator_counts[key]
+            for key in simulator_counts.keys()
+        )
+        / shots
+    )
+    end_time = time()
+    print(
+        f"Simulating 10^{np.log10(shots)} shots from the circuit took {end_time - start_time} s, and the operator's estimated value is {simulator_operator_value}."
+    )
+    if run_circuit:
+        # Calibrate mthree
+        mitigator = mthree.M3Mitigation(device_backend)
+        measured_qubits = [
+            measurement.qubits[0].index
+            for measurement in device_circuit.get_instructions("measure")
+        ]
+        mitigator.cals_from_system(measured_qubits)
+        # Run the device circuit
+        start_time = time()
+        job = device_backend.run(device_circuit, shots=shots)
+        device_counts = job.result().get_counts()
+        corrected_counts = mitigator.apply_correction(device_counts, measured_qubits)
+        dict_counts = dict(corrected_counts)
+        device_operator_value = (
+            sum(
+                (1 - 2 * (sum(int(bit) for bit in key) % 2)) * dict_counts[key]
+                for key in dict_counts.keys()
+            )
+            / shots
+        )
+        end_time = time()
+        print(
+            f"Running 10^{np.log10(shots)} shots from the circuit took {end_time - start_time} s, and the operator's estimated value is {device_operator_value}."
+        )
+
+# %%
+
 if MAIN:
     """
     Suggested parameter values:
@@ -765,21 +967,25 @@ if MAIN:
     # Initialise parameters
     n = 3
     d_list = [2]
-    reset_time = 3
+    reset_time = 1
     reset_count = 1
     sample_number = 12
     shots = 10**4
     backend_name = "aer"
     if backend_name[0:3] == "aer":
-        backend = Aer.get_backend("aer_simulator_statevector")
+        backend = Aer.get_backend("aer_simulator")
+        transpile_kwargs: dict[str, Any] = {
+            "backend": backend,
+            "optimization_level": 3,
+        }
     else:
         provider = IBMQ.load_account()
         backend = provider.get_backend(backend_name)
-    transpile_kwargs: dict[str, Any] = {
-        "backend": backend,
-        "initial_layout": None,
-        "optimization_level": 3,
-    }
+        transpile_kwargs: dict[str, Any] = {
+            "backend": backend,
+            "scheduling_method": "alap",
+            "optimization_level": 3,
+        }
     # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     energy_list = [-1.24212, -1.26774, -1.27297]
     # Estimate the energy for each depth
@@ -808,5 +1014,21 @@ if MAIN:
         f"For depths {d_list} at each scale, the estimated energies are {energy_z_scores} standard errors of the mean away from the true energies."
     )
 
+
+# %%
+
+# Use mapomatic to determine the optimal layout
+# layouts = mm.matching_layouts(deflated_circuit, device_backend)
+# scores = mm.evaluate_layouts(deflated_circuit, layouts, device_backend)
+# trans_durations = []
+# trans_scores = []
+# for score in scores:
+#     device_circuit = transpile(
+#         deflated_circuit,
+#         initial_layout=score[0],
+#         **device_kwargs,
+#     )
+#     trans_durations.append(device_circuit.duration)
+#     trans_scores.append(score[1])
 
 # %%
