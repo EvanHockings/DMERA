@@ -2,20 +2,13 @@
 
 import math
 import random
-import mthree
 import numpy as np
-import mapomatic as mm
 from copy import deepcopy
 from time import time
 from typing import Optional, Union, Any
-from qiskit import IBMQ, ClassicalRegister, QuantumRegister, QuantumCircuit, Aer
-from qiskit.circuit import Parameter
-from qiskit.compiler import transpile
-from qiskit.transpiler import InstructionDurations, PassManager
-from qiskit.transpiler.basepasses import TransformationPass
-from qiskit.dagcircuit import DAGCircuit
-from qiskit.visualization.timeline import draw, IQXSimple, IQXStandard, IQXDebugging
-from qiskit.providers.fake_provider import FakeKolkata
+from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit, Aer  # type: ignore
+from qiskit.circuit import Parameter  # type: ignore
+from qiskit.compiler import transpile  # type: ignore
 
 MAIN = __name__ == "__main__"
 
@@ -339,13 +332,13 @@ def q() -> QuantumCircuit:
         6 / math.sqrt(109),
         0.0,
     ]
-    q_gate.initialize(init_state, [0, 1, 2])
+    q_gate.initialize(init_state, [0, 1, 2])  # type: ignore
     q_gate = transpile(
         q_gate.decompose(),
         backend=Aer.get_backend("aer_simulator_statevector"),
         optimization_level=3,
     )
-    return q_gate
+    return q_gate  # type: ignore
 
 
 # %%
@@ -485,7 +478,7 @@ def generate_transverse_ising_circuits(
         d: Depth at each scale
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
-        print_diagnostics: Print diagnostics for the circuit generation
+        print_diagnostics: Print diagnostics
     Returns:
         quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
         pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
@@ -616,6 +609,7 @@ def estimate_site_energy(
     theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
     theta_values: dict[Parameter, float],
     transpile_kwargs: dict[str, Any],
+    print_diagnostics: bool = False,
 ) -> tuple[list[float], list[float]]:
     """
     Args:
@@ -627,6 +621,7 @@ def estimate_site_energy(
         theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
         theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
         transpile_kwargs: Keyword arguments for circuit transpiling
+        print_diagnostics: Print diagnostics
     Returns:
         sites_energy: Mean energy for each site
         sites_energy_sem: Energy standard error of the mean for each site
@@ -666,9 +661,10 @@ def estimate_site_energy(
     job_results = job.result().get_counts()
     counts: list[dict[str, int]] = [dict(count) for count in job_results]
     end_time = time()
-    print(
-        f"Running the circuits for {sample_number} sites took {end_time - start_time} s."
-    )
+    if print_diagnostics:
+        print(
+            f"Running the circuits for {sample_number} sites took {end_time - start_time} s."
+        )
     # Calculate the value of the operators from the circuit data
     support_operators = [
         sum(
@@ -715,6 +711,7 @@ def estimate_energy(
     reset_time: Optional[int],
     reset_count: int,
     transpile_kwargs: dict[str, Any],
+    print_diagnostics: bool = False,
 ) -> tuple[float, float]:
     """
     Args:
@@ -753,244 +750,48 @@ def estimate_energy(
     )
     # Calculate the mean energy and SEM
     energy_mean: float = np.mean(sites_energy).item()
-    energy_sem_shots = np.sqrt(
+    energy_sem_shots: float = np.sqrt(
         sum(np.array(sites_energy_sem) ** 2) / (len(sites_energy) ** 2)
-    )
-    energy_sem_sample_number = np.sqrt(np.var(sites_energy) / len(sites_energy))
-    energy_sem: float = np.sqrt(
-        energy_sem_shots**2 + energy_sem_sample_number**2
     ).item()
-    print(
-        f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}."
-    )
+    energy_sem_sample_number: float = np.sqrt(
+        np.var(sites_energy) / len(sites_energy)
+    ).item()
+    energy_sem: float = math.sqrt(energy_sem_shots**2 + energy_sem_sample_number**2)
+    if print_diagnostics:
+        print(
+            f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}."
+        )
     return (energy_mean, energy_sem)
 
 
 # %%
 
-
-class RemoveDelays(TransformationPass):
-    """
-    Return a circuit with any delays removed.
-    This transformation is not semantics preserving.
-    """
-
-    def run(self, dag: DAGCircuit) -> DAGCircuit:
-        """
-        Run the RemoveDelays pass on `dag`.
-        """
-        dag.remove_all_ops_named("delay")
-        return dag
-
-
-# %%
-
-if MAIN:
-    # Simulator parameters
-    simulator_backend = Aer.get_backend("aer_simulator")
-    simulator_kwargs: dict[str, Any] = {
-        "backend": simulator_backend,
-        "optimization_level": 3,
-    }
-    # Device parameters
-    is_real = True
-    if is_real:
-        device_name = "ibm_oslo"
-        provider = IBMQ.load_account()
-        device_backend = provider.get_backend(device_name)
-    else:
-        device_backend = FakeKolkata()
-    device_kwargs: dict[str, Any] = {
-        "backend": device_backend,
-        "scheduling_method": "alap",
-        "layout_method": "sabre",
-        "routing_method": "sabre",
-        "optimization_level": 3,
-    }
-
-# %%
-
-
-if MAIN:
-    # Set the parameters
-    n = 3
-    d = 2
-    reset_time = 1
-    reset_count = 1
-    shots = 10**4
-    layer_theta = get_theta_evenbly(d)
-    support = (3, 4, 5)
-    k_reset = 10
-    k_transpile = 20
-    run_circuit = False
-    # Generate circuits
-    (
-        quantum_circuits,
-        pcc_circuits,
-        theta_dict,
-        theta_values,
-    ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
-    # Set the theta values
-    for (layer_index, gate) in theta_dict.keys():
-        theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
-    # Bind the parameters for the `support` pcc circuit
-    theta_values_pcc: dict[Parameter, float] = {
-        theta_dict[(layer_index, gate)]: theta_values[theta_dict[(layer_index, gate)]]
-        for (layer_index, layer) in enumerate(pcc_circuits[support])
-        for gate in layer
-    }
-    circuit = quantum_circuits[support].decompose().bind_parameters(theta_values_pcc)
-    # Transpile the simulator circuit
-    simulator_circuit = transpile(circuit, **simulator_kwargs)
-    # Transpile the device circuit
-    # device_circuits = transpile([circuit]*k_transpile, **device_kwargs)
-    # Testing random circuit generation
-    # If this is worthwhile I can rework my code to make it much more efficient
-    circuit_list: list[QuantumCircuit] = []
-    for idx in range(k_reset):
-        (
-            quantum_circuits,
-            pcc_circuits,
-            theta_dict,
-            theta_values,
-        ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
-        # Set the theta values
-        for (layer_index, gate) in theta_dict.keys():
-            theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
-        # Bind the parameters for the `support` pcc circuit
-        theta_values_pcc: dict[Parameter, float] = {
-            theta_dict[(layer_index, gate)]: theta_values[
-                theta_dict[(layer_index, gate)]
-            ]
-            for (layer_index, layer) in enumerate(pcc_circuits[support])
-            for gate in layer
-        }
-        circuit_list.append(
-            quantum_circuits[support].decompose().bind_parameters(theta_values_pcc)
-        )
-    device_circuits = transpile(circuit_list * k_transpile, **device_kwargs)
-    # Choose the shortest of the k circuits
-    durations: list[int] = [
-        device_circuit.duration for device_circuit in device_circuits
-    ]
-    cx_counts: list[int] = [
-        len(device_circuit.get_instructions("cx")) for device_circuit in device_circuits
-    ]
-    duration_order: np.ndarray = np.argsort(durations)
-    min_duration_arg = np.argmin(durations)
-    min_cx_arg = np.argmin(cx_counts)
-    best_arg = duration_order[np.argmin(np.array(cx_counts)[duration_order][0:k_reset])]
-    print(
-        f"The circuit with the minimum duration {durations[min_duration_arg]} has {cx_counts[min_duration_arg]} CX gates, the circuit with the minimum CX gates {cx_counts[min_cx_arg]} has duration {durations[min_cx_arg]}, and the chosen best circuit has duration {durations[best_arg]} and {cx_counts[best_arg]} CX gates."
-    )
-    short_circuit = device_circuits[best_arg]
-    # Remove delays
-    remove_delays = PassManager(RemoveDelays())
-    deflated_circuit = mm.deflate_circuit(remove_delays.run(short_circuit))
-    # Use mapomatic to determine the optimal layout
-    best_layout = mm.best_overall_layout(deflated_circuit, device_backend)
-    device_circuit = transpile(
-        deflated_circuit, initial_layout=best_layout[0], **device_kwargs
-    )
-    # Display the circuit
-    display(
-        draw(
-            device_circuit,
-            plotter="mpl",
-            style=IQXSimple(**{"formatter.general.fig_width": 40}),
-        )
-    )
-    print(
-        f"The circuit duration is {device_circuit.duration}, which should not be much longer than the duration of the circuit before transpilation {short_circuit.duration}."
-    )
-    # Run the simulator circuit
-    start_time = time()
-    job = simulator_backend.run(simulator_circuit, shots=shots)
-    simulator_counts = dict(job.result().get_counts())
-    simulator_operator_value = (
-        sum(
-            (1 - 2 * (sum(int(bit) for bit in key) % 2)) * simulator_counts[key]
-            for key in simulator_counts.keys()
-        )
-        / shots
-    )
-    end_time = time()
-    print(
-        f"Simulating 10^{np.log10(shots)} shots from the circuit took {end_time - start_time} s, and the operator's estimated value is {simulator_operator_value}."
-    )
-    if run_circuit:
-        # Calibrate mthree
-        mitigator = mthree.M3Mitigation(device_backend)
-        measured_qubits = [
-            measurement.qubits[0].index
-            for measurement in device_circuit.get_instructions("measure")
-        ]
-        mitigator.cals_from_system(measured_qubits)
-        # Run the device circuit
-        start_time = time()
-        job = device_backend.run(device_circuit, shots=shots)
-        device_counts = job.result().get_counts()
-        corrected_counts = mitigator.apply_correction(device_counts, measured_qubits)
-        dict_counts = dict(corrected_counts)
-        device_operator_value = (
-            sum(
-                (1 - 2 * (sum(int(bit) for bit in key) % 2)) * dict_counts[key]
-                for key in dict_counts.keys()
-            )
-            / shots
-        )
-        end_time = time()
-        print(
-            f"Running 10^{np.log10(shots)} shots from the circuit took {end_time - start_time} s, and the operator's estimated value is {device_operator_value}."
-        )
-
-# %%
-
 if MAIN:
     """
-    Suggested parameter values:
-        n: 3 (4 or even higher might be preferable)
-        d_list: [2, 4, 5]
-        reset_time: None or [The amount of time it takes to perform reset in comparison to a u(theta) or w(theta) gate]
-            (to avoid waiting for reset operations to complete)
-        reset_count: [Number of times to perform the reset operation]
-            (more reset operations will produce a better reset)
-        sample_number: 12
-            (unsure if this value is good)
-        shots: 10**5 or 10**2
-            (the former gives accurate results, the latter is appropriate for simulations with reset)
-        backend_name: "aer_simulator_statevector" or "ibm_oslo"
-            (using a physical device like "ibm_oslo" may involve a very long wait, depending on queue times)
-        Note that circuits with reset take much longer to simulate than would seem reasonable, drastically limiting the number of shots we can take.
-        This should not be the case for actual quantum devices, however.
+    End-to-end test of the energy estimation and DMERA ground state preparation.
+    Note that Qiskit is very slow to simulate circuits with reset operations, and consequently the circuits with reset have a factor of 100 fewer shots taken.
+    In fact, this raises questions about how Qiskit is generating shots.
+    Surely it wouldn't need to simulate the entire circuit for each shot!
     """
     # Initialise parameters
     n = 3
-    d_list = [2]
+    d_list = [2, 4, 5]
     reset_time = 1
+    reset_shots = 10**2
+    resetless_time = None
+    resetless_shots = 10**4
     reset_count = 1
     sample_number = 12
-    shots = 10**4
-    backend_name = "aer"
-    if backend_name[0:3] == "aer":
-        backend = Aer.get_backend("aer_simulator")
-        transpile_kwargs: dict[str, Any] = {
-            "backend": backend,
-            "optimization_level": 3,
-        }
-    else:
-        provider = IBMQ.load_account()
-        backend = provider.get_backend(backend_name)
-        transpile_kwargs: dict[str, Any] = {
-            "backend": backend,
-            "scheduling_method": "alap",
-            "optimization_level": 3,
-        }
+    backend = Aer.get_backend("aer_simulator")
+    transpile_kwargs: dict[str, Any] = {
+        "backend": backend,
+        "optimization_level": 3,
+    }
     # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     energy_list = [-1.24212, -1.26774, -1.27297]
-    # Estimate the energy for each depth
-    energy_means: list[float] = []
-    energy_sems: list[float] = []
+    # Estimate the energy for each depth with reset
+    reset_energy_means: list[float] = []
+    reset_energy_sems: list[float] = []
     for d in d_list:
         layer_theta = get_theta_evenbly(d)
         (energy_mean, energy_sem) = estimate_energy(
@@ -998,37 +799,46 @@ if MAIN:
             d,
             layer_theta,
             sample_number,
-            shots,
+            reset_shots,
             reset_time,
             reset_count,
             transpile_kwargs,
         )
-        energy_means.append(energy_mean)
-        energy_sems.append(energy_sem)
-    # Calculate the z scores for the energies
-    energy_z_scores = [
-        (energy_means[index] - energy_list[index]) / energy_sems[index]
+        reset_energy_means.append(energy_mean)
+        reset_energy_sems.append(energy_sem)
+    # Calculate the z scores for the energies with reset
+    reset_z_scores = [
+        (reset_energy_means[index] - energy_list[index]) / reset_energy_sems[index]
         for index in range(len(d_list))
     ]
-    print(
-        f"For depths {d_list} at each scale, the estimated energies are {energy_z_scores} standard errors of the mean away from the true energies."
-    )
-
-
-# %%
-
-# Use mapomatic to determine the optimal layout
-# layouts = mm.matching_layouts(deflated_circuit, device_backend)
-# scores = mm.evaluate_layouts(deflated_circuit, layouts, device_backend)
-# trans_durations = []
-# trans_scores = []
-# for score in scores:
-#     device_circuit = transpile(
-#         deflated_circuit,
-#         initial_layout=score[0],
-#         **device_kwargs,
-#     )
-#     trans_durations.append(device_circuit.duration)
-#     trans_scores.append(score[1])
+    # Assert that all the z scores are within 3 standard deviations of the mean
+    assert all([abs(z_score < 3) for z_score in reset_z_scores])
+    # Estimate the energy for each depth without reset
+    resetless_energy_means: list[float] = []
+    resetless_energy_sems: list[float] = []
+    for d in d_list:
+        layer_theta = get_theta_evenbly(d)
+        (energy_mean, energy_sem) = estimate_energy(
+            n,
+            d,
+            layer_theta,
+            sample_number,
+            resetless_shots,
+            resetless_time,
+            reset_count,
+            transpile_kwargs,
+        )
+        resetless_energy_means.append(energy_mean)
+        resetless_energy_sems.append(energy_sem)
+    # Calculate the z scores for the energies without reset
+    resetless_z_scores = [
+        (resetless_energy_means[index] - energy_list[index])
+        / resetless_energy_sems[index]
+        for index in range(len(d_list))
+    ]
+    # Assert that all the z scores are within 3 standard deviations of the mean
+    assert all([abs(z_score < 3) for z_score in resetless_z_scores])
+    # Print that the tests passed
+    print("Tests passed.")
 
 # %%
