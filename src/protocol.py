@@ -2,13 +2,18 @@
 
 import math
 import random
+import mthree  # type: ignore
 import numpy as np
+import mapomatic as mm  # type: ignore
 from copy import deepcopy
 from time import time
 from typing import Optional, Union, Any
 from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit, Aer  # type: ignore
 from qiskit.circuit import Parameter  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
+from qiskit.transpiler import PassManager  # type: ignore
+from qiskit.transpiler.basepasses import TransformationPass  # type: ignore
+from qiskit.dagcircuit import DAGCircuit  # type: ignore
 
 MAIN = __name__ == "__main__"
 
@@ -91,7 +96,7 @@ def pcc(
 # %%
 
 
-def used(
+def qubits_used(
     circuit: list[list[tuple[int, int]]], sites_list: list[list[int]], n: int
 ) -> tuple[list[int], list[int]]:
     """
@@ -103,16 +108,16 @@ def used(
         start_use: The circuit layer at which each qubit starts being used
         stop_use: The circuit layer at which each qubit stops being used
     """
-    L = len(circuit)
+    l = len(circuit)
     circuit_sorted: list[list[int]] = []
     circuit_sorted.append(sites_list[0])
     for layer in circuit:
         layer_sorted = sorted([qubit for gate in layer for qubit in gate])
         circuit_sorted.append(layer_sorted)
-    # Mark unused qubits with the default value L
+    # Mark unused qubits with the default value l
     qubits = 3 * 2**n
-    start_use: list[int] = [L] * qubits
-    stop_use: list[int] = [L] * qubits
+    start_use: list[int] = [l] * qubits
+    stop_use: list[int] = [l] * qubits
     for qubit in range(qubits):
         # Determine the layers in which the qubit appears
         qubit_used: list[int] = [
@@ -130,56 +135,76 @@ def used(
 # %%
 
 
-def track_reset(
+def track_resets(
     qubits: int,
-    L: int,
+    l: int,
     reset_length: int,
+    reset_configs: int,
     start_use: list[int],
     stop_use: list[int],
     layer_index: int,
-    qubit_map: list[int],
-    resets: list[list[int]],
-    reset_in_progress: list[int],
+    qubit_maps: list[list[int]],
+    reset_circuits: list[list[list[int]]],
+    resetting_trackers: list[list[int]],
 ):
+    """
+    Args:
+        qubits: Number of qubits
+        l: Number of circuit layers
+        reset_length: Time taken to perform the requisite number of resets as a multiple of the time taken for a circuit layer
+        reset_configs: Number of reset configurations
+        start_use: The circuit layer at which each qubit starts being used
+        stop_use: The circuit layer at which each qubit stops being used
+        layer_index:
+        qubit_maps:
+        reset_circuits:
+        resetting_trackers:
+    Updates:
+        qubit_maps
+        reset_circuits
+        resetting_trackers
+    """
     # Determine the qubits that can be reset
     reset_qubits = [
         qubit_index
         for (qubit_index, stop_index) in enumerate(stop_use)
         if stop_index == layer_index
     ]
-    # Determine the qubits that reset qubits could be used to replace
-    reset_allocation_layers = [
-        [
-            qubit_index
-            for (qubit_index, start_index) in enumerate(start_use)
-            if start_index == future_layer_index
-            and qubit_index not in reset_in_progress
+    for reset_idx in range(reset_configs):
+        # Determine the qubits that reset qubits could be used to replace
+        reset_allocation_layers = [
+            [
+                qubit_index
+                for (qubit_index, start_index) in enumerate(start_use)
+                if start_index == future_layer_index
+                and qubit_index not in resetting_trackers[reset_idx]
+            ]
+            for future_layer_index in range(layer_index + 1 + reset_length, l)
         ]
-        for future_layer_index in range(layer_index + 1 + reset_length, L)
-    ]
-    # Randomly shuffle the layers
-    for layer in reset_allocation_layers:
-        random.shuffle(layer)
-    reset_allocation = [
-        qubit_index for layer in reset_allocation_layers for qubit_index in layer
-    ]
-    # Reset qubits and relabel them appropriately with the qubit map
-    reset: list[int] = []
-    for j in range(min(len(reset_qubits), len(reset_allocation))):
-        reset_qubit = reset_qubits[j]
-        paired_qubit = reset_allocation[j]
-        reset.append(qubit_map[reset_qubit])
-        reset_in_progress.append(paired_qubit)
-        qubit_map[paired_qubit] = qubit_map[reset_qubit]
-        qubit_map[reset_qubit] = qubits
-    resets.append(reset)
+        # Randomly shuffle the layers
+        for layer in reset_allocation_layers:
+            random.shuffle(layer)
+        # Flatten the layers
+        reset_allocation = [
+            qubit_index for layer in reset_allocation_layers for qubit_index in layer
+        ]
+        # Reset qubits and relabel them appropriately with the qubit map
+        resets: list[int] = []
+        for j in range(min(len(reset_qubits), len(reset_allocation))):
+            reset_qubit = reset_qubits[j]
+            paired_qubit = reset_allocation[j]
+            resets.append(qubit_maps[reset_idx][reset_qubit])
+            resetting_trackers[reset_idx].append(paired_qubit)
+            qubit_maps[reset_idx][paired_qubit] = qubit_maps[reset_idx][reset_qubit]
+            qubit_maps[reset_idx][reset_qubit] = qubits
+        reset_circuits[reset_idx].append(resets)
     pass
 
 
 # %%
 
 
-def dmera_reset(
+def dmera_resets(
     n: int,
     d: int,
     circuit: list[list[tuple[int, int]]],
@@ -187,11 +212,12 @@ def dmera_reset(
     support: list[int],
     reset_time: Optional[int],
     reset_count: int,
+    reset_configs: int,
 ) -> tuple[
     list[list[tuple[int, int]]],
-    list[list[int]],
-    dict[tuple[int, int], int],
-    dict[int, int],
+    list[list[list[int]]],
+    list[dict[tuple[int, int], int]],
+    list[dict[int, int]],
 ]:
     """
     Args:
@@ -202,73 +228,77 @@ def dmera_reset(
         support: Support of the observable
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
+        reset_configs: Number of random reset configurations to generate
     Returns:
         pcc_circuit: DMERA past causal cone circuit of the observable
-        resets: Qubits which are reset in each layer
-        reset_map: Reset mapping for the qubits upon which the gates in each layer act
-        inverse_map: Inverse mapping for the qubit reset mapping
+        reset_circuits: Qubits which are reset in each layer for each of the reset configurations
+        reset_maps: Reset mapping for the qubits upon which the gates in each layer act for each of the reset configurations
+        inverse_maps: Inverse mapping for the qubit reset mapping for each of the reset configurations
     """
     # Initialise parameters
     pcc_circuit = pcc(circuit, support)
-    L = n * d
+    l = n * d
     qubits = 3 * 2**n
-    assert L == len(pcc_circuit)
+    assert l == len(pcc_circuit)
     if reset_time is None:
-        reset_length = L
+        reset_length = l
     else:
         reset_length = reset_time * reset_count
-    (start_use, stop_use) = used(pcc_circuit, sites_list, n)
-    qubit_map = list(range(qubits))
-    reset_in_progress: list[int] = []
-    # Store the resets and the mapping on the qubits
-    resets: list[list[int]] = []
-    reset_map: dict[tuple[int, int], int] = {}
+    (start_use, stop_use) = qubits_used(pcc_circuit, sites_list, n)
+    # Initialise the reset trackets for each of the random reset configurations
+    qubit_maps: list[list[int]] = [list(range(qubits)) for _ in range(reset_configs)]
+    reset_circuits: list[list[list[int]]] = [[[]] for _ in range(reset_configs)]
+    resetting_trackers: list[list[int]] = [[] for _ in range(reset_configs)]
+    reset_maps: list[dict[tuple[int, int], int]] = [{} for _ in range(reset_configs)]
     # Track resets for initialisation
-    track_reset(
+    track_resets(
         qubits,
-        L,
+        l,
         reset_length,
+        reset_configs,
         start_use,
         stop_use,
         -1,
-        qubit_map,
-        resets,
-        reset_in_progress,
+        qubit_maps,
+        reset_circuits,
+        resetting_trackers,
     )
-    for qubit in sites_list[0]:
-        reset_map[(-1, qubit)] = qubit_map[qubit]
-    #################################################
+    for reset_idx in range(reset_configs):
+        for qubit in sites_list[0]:
+            reset_maps[reset_idx][(-1, qubit)] = qubit_maps[reset_idx][qubit]
     # Determine the resets for the circuit
-    #################################################
     for (layer_index, layer) in enumerate(pcc_circuit):
-        # Update the reset tracker and store the qubit mapping for the gates
-        for gate in layer:
-            if gate[0] in reset_in_progress:
-                reset_in_progress.remove(gate[0])
-            if gate[1] in reset_in_progress:
-                reset_in_progress.remove(gate[1])
-            reset_map[(layer_index, gate[0])] = qubit_map[gate[0]]
-            reset_map[(layer_index, gate[1])] = qubit_map[gate[1]]
+        # Track resets and store the qubit mapping for the gates
+        for reset_idx in range(reset_configs):
+            for gate in layer:
+                for site in gate:
+                    if site in resetting_trackers[reset_idx]:
+                        resetting_trackers[reset_idx].remove(site)
+                    reset_maps[reset_idx][(layer_index, site)] = qubit_maps[reset_idx][
+                        site
+                    ]
         # Track resets in the layer
-        track_reset(
+        track_resets(
             qubits,
-            L,
+            l,
             reset_length,
+            reset_configs,
             start_use,
             stop_use,
             layer_index,
-            qubit_map,
-            resets,
-            reset_in_progress,
+            qubit_maps,
+            reset_circuits,
+            resetting_trackers,
         )
-    #################################################
-    # Generate the inverse map
-    #################################################
-    qubit_reset_map = list(set(reset_map.values()))
-    inverse_map: dict[int, int] = {}
-    for (qubit_index, qubit) in enumerate(qubit_reset_map):
-        inverse_map[qubit] = qubit_index
-    return (pcc_circuit, resets, reset_map, inverse_map)
+    # Generate the inverse maps
+    inverse_maps: list[dict[int, int]] = [
+        {
+            qubit: qubit_index
+            for (qubit_index, qubit) in enumerate(set(reset_maps[reset_idx].values()))
+        }
+        for reset_idx in range(reset_configs)
+    ]
+    return (pcc_circuit, reset_circuits, reset_maps, inverse_maps)
 
 
 # %%
@@ -335,7 +365,7 @@ def q() -> QuantumCircuit:
     q_gate.initialize(init_state, [0, 1, 2])  # type: ignore
     q_gate = transpile(
         q_gate.decompose(),
-        backend=Aer.get_backend("aer_simulator_statevector"),
+        backend=Aer.get_backend("aer_simulator"),
         optimization_level=3,
     )
     return q_gate  # type: ignore
@@ -344,226 +374,28 @@ def q() -> QuantumCircuit:
 # %%
 
 
-def generate_params(
-    circuit: list[list[tuple[int, int]]]
-) -> tuple[dict[tuple[int, tuple[int, int]], Parameter], dict[Parameter, float]]:
+def theta(d: int) -> tuple[dict[int, Parameter], dict[Parameter, float]]:
     """
     Args:
-        circuit: Circuit
+        d: Depth at each scale
     Returns:
-        theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
-        theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
+        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
+        theta_values: Dictionary of Qiskit parameter values for each parameter
     """
-    theta_dict: dict[tuple[int, tuple[int, int]], Parameter] = {}
+    theta_dict: dict[int, Parameter] = {}
     theta_values: dict[Parameter, float] = {}
-    for (layer_index, layer) in enumerate(circuit):
-        for gate in layer:
-            # Each gate is given an individual parameter, even though the parameter for each gate in a layer is the same, because it allows for easier calculation of derivatives without repeated transpilation
-            theta_dict[(layer_index, gate)] = Parameter(f"theta({layer_index},{gate})")
-            theta_values[theta_dict[(layer_index, gate)]] = 0.0
+    for layer_index in range(d):
+        theta_dict[layer_index] = Parameter(f"theta({layer_index})")
+        theta_values[theta_dict[layer_index]] = 0.0
     return (theta_dict, theta_values)
 
 
-# %%
-
-
-def generate_dmera_reset(
-    n: int,
-    d: int,
-    pcc_circuit: list[list[tuple[int, int]]],
-    sites_list: list[list[int]],
-    support: list[int],
-    theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
-    resets: list[list[int]],
-    reset_map: dict[tuple[int, int], int],
-    inverse_map: dict[int, int],
-    q_gate: QuantumCircuit,
-    reset_count: int,
-    barriers: bool = False,
-    reverse_gate: bool = True,
-) -> QuantumCircuit:
-    """
-    Args:
-        n: Number of scales
-        d: Depth at each scale
-        pcc_circuit: DMERA past causal cone circuit of the observable
-        sites_list: List of the sites at each scale
-        support: Support of the observable
-        theta_dict: Dictonary of Qiskit parameters for each layer, indexed by the layer and gate
-        resets: Qubits which are reset in each layer
-        reset_map: Reset mappings for the qubits upon which the gates in each layer act
-        inverse_map: Inverse mapping for the qubit reset mapping
-        q_gate: Qiskit circuit that prepares the initial state
-        reset_count: Number of reset operations to perform a reset
-        barriers: Add barriers to the circuit for ease of readability
-        reverse_gate: For each gate, reverse which qubit is considered to be the 'first' on which the gate operates
-    Returns:
-        quantum_circuit: A Qiskit circuit implementing the DMERA circuit with reset
-    """
-    # Determine the qubits from the reset map and set up the circuit
-    L = n * d
-    qubits = list(inverse_map.keys())
-    quantum_register = (QuantumRegister(1, "qubit" + str(qubit)) for qubit in qubits)
-    classical_register = ClassicalRegister(len(support), "measure")
-    quantum_circuit = QuantumCircuit(*(quantum_register), classical_register)
-    assert len(qubits) <= 3 * 2**n
-    assert L == len(pcc_circuit)
-    # Initialise the quantum circuit
-    quantum_circuit.append(
-        q_gate.to_gate(),
-        [
-            inverse_map[reset_map[(-1, sites_list[0][0])]],
-            inverse_map[reset_map[(-1, sites_list[0][1])]],
-            inverse_map[reset_map[(-1, sites_list[0][2])]],
-        ],
-    )
-    for qubit in resets[0]:
-        for _ in range(reset_count):
-            quantum_circuit.reset(inverse_map[qubit])
-    # Populate the circuit with gates and reset
-    for (layer_index, layer) in enumerate(pcc_circuit):
-        for gate in layer:
-            # Determine the appropriate gate
-            if layer_index % d == 0:
-                custom_gate = w(theta_dict[(layer_index, gate)]).to_gate()
-
-            else:
-                custom_gate = u(theta_dict[(layer_index, gate)]).to_gate()
-
-            # Append the gate to the circuit
-            if reverse_gate:
-                quantum_circuit.append(
-                    custom_gate,
-                    [
-                        inverse_map[reset_map[(layer_index, gate[1])]],
-                        inverse_map[reset_map[(layer_index, gate[0])]],
-                    ],
-                )
-            else:
-                quantum_circuit.append(
-                    custom_gate,
-                    [
-                        inverse_map[reset_map[(layer_index, gate[0])]],
-                        inverse_map[reset_map[(layer_index, gate[1])]],
-                    ],
-                )
-        # Add barriers to the circuit for ease of readability
-        if barriers and layer_index != L - 1:
-            quantum_circuit.barrier()
-        # Reset the appropriate qubits
-        for qubit in resets[1 + layer_index]:
-            for _ in range(reset_count):
-                quantum_circuit.reset(inverse_map[qubit])
-    return quantum_circuit
-
-
-# %%
-
-
-def generate_transverse_ising_circuits(
-    n: int,
-    d: int,
-    reset_time: Optional[int],
-    reset_count: int,
-    print_diagnostics: bool = False,
-) -> tuple[
-    dict[Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit],
-    dict[Union[tuple[int, int], tuple[int, int, int]], list[list[tuple[int, int]]]],
-    dict[tuple[int, tuple[int, int]], Parameter],
-    dict[Parameter, float],
-]:
-    """
-    Args:
-        n: Number of scales
-        d: Depth at each scale
-        reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
-        reset_count: Number of reset operations to perform a reset
-        print_diagnostics: Print diagnostics
-    Returns:
-        quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
-        pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
-        theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
-        theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
-    """
-    # Initialise the circuit and variational parameters
-    L = n * d
-    qubits = 3 * 2**n
-    (circuit, sites_list) = dmera(n, d)
-    (theta_dict, theta_values) = generate_params(circuit)
-    q_gate = q()
-    assert L == len(circuit)
-    # Generate the supports
-    two_qubit_supports = [[(i + 0) % qubits, (i + 1) % qubits] for i in range(qubits)]
-    three_qubit_supports = [
-        [(i - 1) % qubits, (i + 0) % qubits, (i + 1) % qubits] for i in range(qubits)
-    ]
-    supports: list[list[int]] = two_qubit_supports + three_qubit_supports
-    qubit_numbers: list[int] = []
-    quantum_circuits: dict[
-        Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit
-    ] = {}
-    pcc_circuits: dict[
-        Union[tuple[int, int], tuple[int, int, int]], list[list[tuple[int, int]]]
-    ] = {}
-    # Generate the circuits
-    for support in supports:
-        # Generate the reset circuit parameters
-        (pcc_circuit, resets, reset_map, inverse_map) = dmera_reset(
-            n, d, circuit, sites_list, support, reset_time, reset_count
-        )
-        # Generate the Qiskit circuit
-        quantum_circuit = generate_dmera_reset(
-            n,
-            d,
-            pcc_circuit,
-            sites_list,
-            support,
-            theta_dict,
-            resets,
-            reset_map,
-            inverse_map,
-            q_gate,
-            reset_count,
-        )
-        # Store the requisite number of qubits
-        num_qubits = len(list(set(reset_map.values())))
-        assert num_qubits == quantum_circuit.num_qubits
-        qubit_numbers.append(num_qubits)
-        # Add the appropriate measurements
-        support_mapped = [inverse_map[reset_map[(L - 1, qubit)]] for qubit in support]
-        if len(support) == 2:
-            quantum_circuit.h(support_mapped[0])
-            quantum_circuit.h(support_mapped[1])
-            quantum_circuit.measure(support_mapped[0], 0)
-            quantum_circuit.measure(support_mapped[1], 1)
-        elif len(support) == 3:
-            quantum_circuit.h(support_mapped[0])
-            quantum_circuit.h(support_mapped[2])
-            quantum_circuit.measure(support_mapped[0], 0)
-            quantum_circuit.measure(support_mapped[1], 1)
-            quantum_circuit.measure(support_mapped[2], 2)
-        else:
-            raise ValueError
-        # Add the circuit to the dictionary
-        quantum_circuits[tuple(support)] = quantum_circuit
-        pcc_circuits[tuple(support)] = pcc_circuit
-    # Print a diagnostic
-    if print_diagnostics:
-        print(
-            f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
-        )
-    return (quantum_circuits, pcc_circuits, theta_dict, theta_values)
-
-
-# %%
-
-
-def get_theta_evenbly(d: int) -> list[float]:
+def theta_evenbly(d: int) -> list[float]:
     """
     Args:
         d: Depth at each scale
     Returns:
-        theta_evenbly: Angles supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
+        layer_theta: Angles supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     """
     theta_evenbly_2 = [math.pi / 12, -math.pi / 6]
     theta_evenbly_4 = [
@@ -580,54 +412,149 @@ def get_theta_evenbly(d: int) -> list[float]:
         0.157462489552395,
     ]
     if d == 2:
-        theta_evenbly = theta_evenbly_2
+        layer_theta = theta_evenbly_2
     elif d == 4:
-        theta_evenbly = theta_evenbly_4
+        layer_theta = theta_evenbly_4
     elif d == 5:
-        theta_evenbly = theta_evenbly_5
+        layer_theta = theta_evenbly_5
     else:
         print(
             f"No cached values for theta when d = {d}. Falling back and setting all thetas to be zero."
         )
-        theta_evenbly = [0.0] * d
-    return theta_evenbly
+        layer_theta = [0.0] * d
+    return layer_theta
 
 
 # %%
 
 
-def estimate_site_energy(
+def dmera_reset_circuits(
     n: int,
-    sample_number: int,
-    shots: int,
-    quantum_circuits: dict[
-        Union[tuple[int, int], tuple[int, int, int]], QuantumCircuit
-    ],
-    pcc_circuits: dict[
-        Union[tuple[int, int], tuple[int, int, int]], list[list[tuple[int, int]]]
-    ],
-    theta_dict: dict[tuple[int, tuple[int, int]], Parameter],
-    theta_values: dict[Parameter, float],
-    transpile_kwargs: dict[str, Any],
-    print_diagnostics: bool = False,
-) -> tuple[list[float], list[float]]:
+    d: int,
+    pcc_circuit: list[list[tuple[int, int]]],
+    sites_list: list[list[int]],
+    support: list[int],
+    theta_dict: dict[int, Parameter],
+    reset_count: int,
+    reset_configs: int,
+    reset_circuits: list[list[list[int]]],
+    reset_maps: list[dict[tuple[int, int], int]],
+    inverse_maps: list[dict[int, int]],
+    barriers: bool = False,
+    reverse_gate: bool = True,
+) -> list[QuantumCircuit]:
     """
     Args:
         n: Number of scales
-        sample_number: Number of sites to sample the energy from
-        shots: Number of shots to measure for each circuit
-        quantum_circuits: A dictionary of Qiskit circuits implementing the DMERA circuit with reset for all of the different observables, indexed by the support of the observables
-        pcc_circuits: A dictionary of DMERA past causal cone circuits for all of the different observables, indexed by the support of the observables
-        theta_dict: Dictonary of Qiskit parameters for each gate in each layer of the circuit, indexed by the layer and gate
-        theta_values: Dictionary of Qiskit parameter values for each parameter, indexed by the parameter
-        transpile_kwargs: Keyword arguments for circuit transpiling
+        d: Depth at each scale
+        pcc_circuit: DMERA past causal cone circuit of the observable
+        sites_list: List of the sites at each scale
+        support: Support of the observable
+        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
+        reset_count: Number of reset operations to perform a reset
+        reset_configs: Number of random reset configurations to generate
+        reset_circuits: Qubits which are reset in each layer for each of the reset configurations
+        reset_maps: Reset mapping for the qubits upon which the gates in each layer act for each of the reset configurations
+        inverse_maps: Inverse mapping for the qubit reset mapping for each of the reset configurations
+        barriers: Add barriers to the circuit for ease of readability
+        reverse_gate: For each gate, reverse which qubit is considered to be the 'first' on which the gate operates
+    Returns:
+        quantum_circuits: Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations
+    """
+    # Determine the qubits from the reset map and set up the circuit
+    l = n * d
+    classical_register = ClassicalRegister(len(support), "measure")
+    quantum_circuits = [
+        QuantumCircuit(
+            *(
+                (
+                    QuantumRegister(1, "qubit" + str(qubit))
+                    for qubit in list(inverse_maps[reset_idx].keys())
+                )
+            ),
+            classical_register,
+        )
+        for reset_idx in range(reset_configs)
+    ]
+    # Initialise the quantum circuit
+    q_gate = q().to_gate()
+    for reset_idx in range(reset_configs):
+        quantum_circuits[reset_idx].append(
+            q_gate,
+            [
+                inverse_maps[reset_idx][reset_maps[reset_idx][(-1, site)]]
+                for site in sites_list[0]
+            ],
+        )
+        for qubit in reset_circuits[reset_idx][0]:
+            for _ in range(reset_count):
+                quantum_circuits[reset_idx].reset(inverse_maps[reset_idx][qubit])
+    # Initialise the gates in the quantum circuit
+    gate_list = [w(theta_dict[0]).to_gate()] + [
+        u(theta_dict[layer_index]).to_gate() for layer_index in range(1, d)
+    ]
+    # Populate the quantum circuit with gates and reset
+    for (layer_index, layer) in enumerate(pcc_circuit):
+        for reset_idx in range(reset_configs):
+            for gate in layer:
+                # Append the gate to the circuit
+                gate_indices = [
+                    inverse_maps[reset_idx][reset_maps[reset_idx][(layer_index, site)]]
+                    for site in gate
+                ]
+                if reverse_gate:
+                    gate_indices.reverse()
+                quantum_circuits[reset_idx].append(
+                    gate_list[layer_index % d], gate_indices
+                )
+            # Add barriers to the circuit for ease of readability
+            if barriers and layer_index != l - 1:
+                quantum_circuits[reset_idx].barrier()
+            # Reset the appropriate qubits
+            for qubit in reset_circuits[reset_idx][1 + layer_index]:
+                for _ in range(reset_count):
+                    quantum_circuits[reset_idx].reset(inverse_maps[reset_idx][qubit])
+    return quantum_circuits
+
+
+# %%
+
+
+def transverse_ising_circuits(
+    n: int,
+    d: int,
+    sample_number: int,
+    reset_time: Optional[int],
+    reset_count: int,
+    reset_configs: int,
+    print_diagnostics: bool = False,
+) -> tuple[
+    dict[Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]],
+    list[int],
+    dict[int, Parameter],
+    dict[Parameter, float],
+]:
+    """
+    Args:
+        n: Number of scales
+        d: Depth at each scale
+        reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
+        reset_count: Number of reset operations to perform a reset
+        reset_configs: Number of random reset configurations to generate
         print_diagnostics: Print diagnostics
     Returns:
-        sites_energy: Mean energy for each site
-        sites_energy_sem: Energy standard error of the mean for each site
+        operator_circuits: Dictionary of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations, indexed by the support of the observables
+        sites: The local observables of these sites are measured by the circuits
+        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
+        theta_values: Dictionary of Qiskit parameter values for each parameter
     """
-    # Generate random sites and determine the supports for each site
+    # Initialise the circuit and variational parameters
+    l = n * d
     qubits = 3 * 2**n
+    (circuit, sites_list) = dmera(n, d)
+    (theta_dict, theta_values) = theta(d)
+    assert l == len(circuit)
+    # Generate the supports
     sites = sorted(random.sample(range(qubits), sample_number))
     sites_supports: list[list[Union[tuple[int, int], tuple[int, int, int]]]] = [
         [
@@ -640,33 +567,104 @@ def estimate_site_energy(
     flattened_supports: list[Union[tuple[int, int], tuple[int, int, int]]] = sorted(
         list(set([support for supports in sites_supports for support in supports]))
     )
-    # Bind the parameters for the circuits
-    bound_circuits: list[QuantumCircuit] = []
-    for site_support in flattened_supports:
-        theta_values_pcc: dict[Parameter, float] = {
-            theta_dict[(layer_index, gate)]: theta_values[
-                theta_dict[(layer_index, gate)]
-            ]
-            for (layer_index, layer) in enumerate(pcc_circuits[site_support])
-            for gate in layer
-        }
-        bound_circuits.append(
-            quantum_circuits[site_support].decompose().bind_parameters(theta_values_pcc)
+    # Generate the circuits
+    qubit_numbers: list[int] = []
+    operator_circuits: dict[
+        Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]
+    ] = {}
+    for support in flattened_supports:
+        list_support = list(support)
+        # Generate the reset circuit parameters
+        (pcc_circuit, reset_circuits, reset_maps, inverse_maps) = dmera_resets(
+            n,
+            d,
+            circuit,
+            sites_list,
+            list_support,
+            reset_time,
+            reset_count,
+            reset_configs,
         )
-    # Transpile the circuits
-    site_circuits = transpile(bound_circuits, **transpile_kwargs)
-    # Run the circuits
-    start_time = time()
-    job = backend.run(site_circuits, shots=shots)
-    job_results = job.result().get_counts()
-    counts: list[dict[str, int]] = [dict(count) for count in job_results]
-    end_time = time()
+        # Generate the Qiskit circuit
+        quantum_circuits = dmera_reset_circuits(
+            n,
+            d,
+            pcc_circuit,
+            sites_list,
+            list_support,
+            theta_dict,
+            reset_count,
+            reset_configs,
+            reset_circuits,
+            reset_maps,
+            inverse_maps,
+        )
+        # Add the appropriate measurements to the circuits
+        for reset_idx in range(reset_configs):
+            # Store the requisite number of qubits
+            num_qubits = len(list(set(reset_maps[reset_idx].values())))
+            assert num_qubits == quantum_circuits[reset_idx].num_qubits
+            qubit_numbers.append(num_qubits)
+            # Measure in the appropriate bases
+            support_mapped = [
+                inverse_maps[reset_idx][reset_maps[reset_idx][(l - 1, qubit)]]
+                for qubit in support
+            ]
+            if len(support) == 2:
+                measure_x_qubits = [support_mapped[0], support_mapped[1]]
+            elif len(support) == 3:
+                measure_x_qubits = [support_mapped[0], support_mapped[2]]
+            else:
+                raise ValueError("Invalid support")
+            quantum_circuits[reset_idx].h(measure_x_qubits)
+            quantum_circuits[reset_idx].measure(support_mapped, range(len(support)))
+        # Add the circuits to the dictionary
+        operator_circuits[support] = quantum_circuits
+    # Print a diagnostic
     if print_diagnostics:
         print(
-            f"Running the circuits for {sample_number} sites took {end_time - start_time} s."
+            f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
         )
-    # Calculate the value of the operators from the circuit data
-    support_operators = [
+    return (operator_circuits, sites, theta_dict, theta_values)
+
+
+# %%
+
+
+def simulator_operators(
+    shots: int,
+    bound_circuits: list[list[QuantumCircuit]],
+    transpile_kwargs: dict[str, Any],
+    print_diagnostics: bool = False,
+) -> list[float]:
+    """
+    Args:
+        shots: Number of shots to measure for each circuit
+        bound_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters for each of the observables
+        transpile_kwargs: Keyword arguments for circuit transpiling
+        print_diagnostics: Print diagnostics
+    Returns:
+        operators: Estimated observable operator values
+    """
+    # If the circuits are being simulated, we don't need to worry about their quality
+    backend = transpile_kwargs["backend"]
+    start_time = time()
+    best_circuits: list[QuantumCircuit] = transpile([circuit_list[0] for circuit_list in bound_circuits], **transpile_kwargs)  # type: ignore
+    end_time = time()
+    if print_diagnostics:
+        print(f"Transpiling the circuits took {end_time - start_time} s.")
+    # Simulate the circuits
+    start_time = time()
+    job = backend.run(best_circuits, shots=shots)
+    job_results = job.result().get_counts()
+    end_time = time()
+    if print_diagnostics:
+        print(f"Simulating the circuits took {end_time - start_time} s.")
+    # Calculate the value of the operators
+    counts: list[dict[str, int]] = [
+        dict(circuit_counts) for circuit_counts in job_results
+    ]
+    operators = [
         sum(
             (1 - 2 * (sum(int(bit) for bit in key) % 2)) * count[key]
             for key in count.keys()
@@ -674,23 +672,173 @@ def estimate_site_energy(
         / shots
         for count in counts
     ]
+    return operators
+
+
+# %%
+
+
+class RemoveDelays(TransformationPass):
+    """
+    Remove delays from a circuit
+    """
+
+    def run(self, dag: DAGCircuit) -> DAGCircuit:
+        dag.remove_all_ops_named("delay")  # type: ignore
+        return dag
+
+
+def device_operators(
+    shots: int,
+    bound_circuits: list[list[QuantumCircuit]],
+    reset_configs: int,
+    transpile_configs: int,
+    transpile_kwargs: dict[str, Any],
+    print_diagnostics: bool = False,
+) -> list[float]:
+    """
+    Args:
+        shots: Number of shots to measure for each circuit
+        bound_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters
+        reset_configs: Number of random reset configurations to generate
+        transpile_configs: Number of random transpilation configurations to generate
+        transpile_kwargs: Keyword arguments for circuit transpiling
+        print_diagnostics: Print diagnostics
+    Returns:
+        operators: Estimated observable operator values
+    """
+    # If the circuits are being run on a device, we need to do a lot to ensure that the results are good
+    backend = transpile_kwargs["backend"]
+    remove_delays = PassManager(RemoveDelays())
+    assert all([len(circuit_list) == reset_configs for circuit_list in bound_circuits])
+    start_time = time()
+    best_circuits: list[QuantumCircuit] = []
+    for circuit_list in bound_circuits:
+        # Generate a large set of circuits
+        trial_circuits: list[QuantumCircuit] = transpile(
+            circuit_list * transpile_configs, **transpile_kwargs
+        )  # type: ignore
+        durations = [circuit.duration for circuit in trial_circuits]
+        cx_counts = [len(circuit.get_instructions("cx")) for circuit in trial_circuits]
+        if any([duration == None for duration in durations]):
+            # Choose the circuit with the lowest CX gate count if the circuits do not have durations
+            best_arg = np.argmin(cx_counts)  # type: ignore
+        else:
+            # Choose the circuit with the lowest CX gate count among the reset_configs circuits with the lowest durations
+            duration_order = np.argsort(durations)  # type: ignore
+            best_arg = duration_order[np.argmin(np.array(cx_counts)[duration_order][0:reset_configs])]  # type: ignore
+        # Remove delays and use mapomatic to determine the optimal layout
+        deflated_circuit = mm.deflate_circuit(remove_delays.run(trial_circuits[best_arg]))  # type: ignore
+        best_layout: tuple[list[int], str, float] = mm.best_overall_layout(deflated_circuit, backend)  # type: ignore
+        # Re-transpile the circuit with the optimal layout
+        best_circuit: QuantumCircuit = transpile(
+            deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs
+        )  # type: ignore
+        best_circuits.append(best_circuit)
+    end_time = time()
+    if print_diagnostics:
+        print(f"Transpiling the circuits took {end_time - start_time} s.")
+    # Run the circuits
+    start_time = time()
+    job = backend.run(best_circuits, shots=shots)
+    job_results = job.result().get_counts()
+    end_time = time()
+    if print_diagnostics:
+        print(f"Running the circuits took {end_time - start_time} s.")
+    # Calculate the value of the operators using measurement error mitigation
+    mitigator = mthree.M3Mitigation(backend)
+    measured_qubits: list[list[int]] = [[measurement.qubits[0].index for measurement in best_circuit.get_instructions("measure")] for best_circuit in best_circuits]  # type: ignore
+    operators: list[float] = []
+    for circuit_counts, qubits in zip(job_results, measured_qubits):
+        mitigator.cals_from_system(qubits)  # type: ignore
+        mitigated_counts = mitigator.apply_correction(circuit_counts, qubits)  # type: ignore
+        operators.append(mitigated_counts.expval())  # type: ignore
+    return operators
+
+
+# %%
+
+
+def estimate_site_energy(
+    n: int,
+    shots: int,
+    operator_circuits: dict[
+        Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]
+    ],
+    sites: list[int],
+    theta_values: dict[Parameter, float],
+    reset_configs: int,
+    transpile_configs: int,
+    transpile_kwargs: dict[str, Any],
+    print_diagnostics: bool = False,
+) -> tuple[list[float], list[float]]:
+    """
+    Args:
+        n: Number of scales
+        shots: Number of shots to measure for each circuit
+        operator_circuits: Dictionary of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations, indexed by the support of the observables
+        sites: The local observables of these sites are measured by the circuits
+        theta_values: Dictionary of Qiskit parameter values for each parameter
+        reset_configs: Number of random reset configurations to generate
+        transpile_configs: Number of random transpilation configurations to generate
+        transpile_kwargs: Keyword arguments for circuit transpiling
+        print_diagnostics: Print diagnostics
+    Returns:
+        sites_energy: Mean energy for each site
+        sites_energy_sem: Energy standard error of the mean for each site
+    """
+    # Re-determine the supports for each site
+    qubits = 3 * 2**n
+    sites_supports: list[list[Union[tuple[int, int], tuple[int, int, int]]]] = [
+        [
+            ((site - 1) % qubits, (site + 0) % qubits, (site + 1) % qubits),
+            ((site - 1) % qubits, (site + 0) % qubits),
+            ((site + 0) % qubits, (site + 1) % qubits),
+        ]
+        for site in sites
+    ]
+    flattened_supports: list[Union[tuple[int, int], tuple[int, int, int]]] = sorted(
+        list(set([support for supports in sites_supports for support in supports]))
+    )
+    # Bind the parameters for the circuits
+    bound_circuits: list[list[QuantumCircuit]] = [
+        [
+            circuit.decompose().bind_parameters(theta_values)
+            for circuit in operator_circuits[site_support]
+        ]
+        for site_support in flattened_supports
+    ]
+    # Transpile and run the circuits
+    if transpile_kwargs["backend"].name()[0:3] == "aer":
+        operators = simulator_operators(
+            shots, bound_circuits, transpile_kwargs, print_diagnostics
+        )
+    else:
+        operators = device_operators(
+            shots,
+            bound_circuits,
+            reset_configs,
+            transpile_configs,
+            transpile_kwargs,
+            print_diagnostics,
+        )
     # Determine the energy at each of the sites
     sites_energy: list[float] = []
     sites_energy_sem: list[float] = []
-    for site_index in range(sample_number):
+    for site_index in range(len(sites)):
         site_operators = [
-            support_operators[flattened_supports.index(site_support)]
+            operators[flattened_supports.index(site_support)]
             for site_support in sites_supports[site_index]
         ]
         energy = site_operators[0] - 0.5 * (site_operators[1] + site_operators[2])
         energy_sem = math.sqrt(
             (
-                (1 + site_operators[0]) * (1 - site_operators[0])
-                + 0.25
-                * (
-                    (1 + site_operators[1]) * (1 - site_operators[1])
-                    + (1 + site_operators[2]) * (1 - site_operators[2])
+                (1 + site_operators[0]) * (1 - site_operators[0]) / 4
+                + (
+                    (1 + site_operators[1]) * (1 - site_operators[1]) / 4
+                    + (1 + site_operators[2]) * (1 - site_operators[2]) / 4
                 )
+                / 4
             )
             / shots
         )
@@ -709,7 +857,9 @@ def estimate_energy(
     sample_number: int,
     shots: int,
     reset_time: Optional[int],
-    reset_count: int,
+    reset_count: Optional[int],
+    reset_configs: Optional[int],
+    transpile_configs: Optional[int],
     transpile_kwargs: dict[str, Any],
     print_diagnostics: bool = False,
 ) -> tuple[float, float]:
@@ -722,32 +872,46 @@ def estimate_energy(
         shots: Number of shots to measure for each circuit
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
+        reset_configs: Number of random reset configurations to generate
         transpile_kwargs: Keyword arguments for circuit transpiling
     Returns:
         energy_mean: Energy per site mean
         energy_sem: Energy per site standard error of the mean
     """
+    # Set the optional arguments
+    if reset_count is None:
+        reset_count = 1
+    if reset_configs is None:
+        reset_configs = 1
+    if transpile_configs is None:
+        transpile_configs = 1
     # Generate the circuits
-    (
-        quantum_circuits,
-        pcc_circuits,
-        theta_dict,
-        theta_values,
-    ) = generate_transverse_ising_circuits(n, d, reset_time, reset_count)
+    start_time = time()
+    (operator_circuits, sites, theta_dict, theta_values,) = transverse_ising_circuits(
+        n, d, sample_number, reset_time, reset_count, reset_configs
+    )
+    end_time = time()
+    if print_diagnostics:
+        print(f"Generating the circuits took {end_time - start_time} s.")
     # Set the theta values
-    for (layer_index, gate) in theta_dict.keys():
-        theta_values[theta_dict[(layer_index, gate)]] = layer_theta[layer_index % d]
+    for layer_index in range(d):
+        theta_values[theta_dict[layer_index]] = layer_theta[layer_index]
     # Estimate the energy of the sites
+    start_time = time()
     (sites_energy, sites_energy_sem) = estimate_site_energy(
         n,
-        sample_number,
         shots,
-        quantum_circuits,
-        pcc_circuits,
-        theta_dict,
+        operator_circuits,
+        sites,
         theta_values,
+        reset_configs,
+        transpile_configs,
         transpile_kwargs,
+        print_diagnostics,
     )
+    end_time = time()
+    if print_diagnostics:
+        print(f"Estimating the energy took {end_time - start_time} s.")
     # Calculate the mean energy and SEM
     energy_mean: float = np.mean(sites_energy).item()
     energy_sem_shots: float = np.sqrt(
@@ -759,86 +923,9 @@ def estimate_energy(
     energy_sem: float = math.sqrt(energy_sem_shots**2 + energy_sem_sample_number**2)
     if print_diagnostics:
         print(
-            f"The average energy per site is {energy_mean:.4f} with a standard error of the mean {energy_sem:.4f}; the shots component to the SEM is {energy_sem_shots:.4f} and the sample variance component is {energy_sem_sample_number:.4f}."
+            f"The average energy per site is {energy_mean:.5f} with a standard error of the mean {energy_sem:.5f}."
         )
     return (energy_mean, energy_sem)
 
-
-# %%
-
-if MAIN:
-    """
-    End-to-end test of the energy estimation and DMERA ground state preparation.
-    Note that Qiskit is very slow to simulate circuits with reset operations, and consequently the circuits with reset have a factor of 100 fewer shots taken.
-    In fact, this raises questions about how Qiskit is generating shots.
-    Surely it wouldn't need to simulate the entire circuit for each shot!
-    """
-    # Initialise parameters
-    n = 3
-    d_list = [2, 4, 5]
-    reset_time = 1
-    reset_shots = 10**2
-    resetless_time = None
-    resetless_shots = 10**4
-    reset_count = 1
-    sample_number = 12
-    backend = Aer.get_backend("aer_simulator")
-    transpile_kwargs: dict[str, Any] = {
-        "backend": backend,
-        "optimization_level": 3,
-    }
-    # Energies supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
-    energy_list = [-1.24212, -1.26774, -1.27297]
-    # Estimate the energy for each depth with reset
-    reset_energy_means: list[float] = []
-    reset_energy_sems: list[float] = []
-    for d in d_list:
-        layer_theta = get_theta_evenbly(d)
-        (energy_mean, energy_sem) = estimate_energy(
-            n,
-            d,
-            layer_theta,
-            sample_number,
-            reset_shots,
-            reset_time,
-            reset_count,
-            transpile_kwargs,
-        )
-        reset_energy_means.append(energy_mean)
-        reset_energy_sems.append(energy_sem)
-    # Calculate the z scores for the energies with reset
-    reset_z_scores = [
-        (reset_energy_means[index] - energy_list[index]) / reset_energy_sems[index]
-        for index in range(len(d_list))
-    ]
-    # Assert that all the z scores are within 3 standard deviations of the mean
-    assert all([abs(z_score < 3) for z_score in reset_z_scores])
-    # Estimate the energy for each depth without reset
-    resetless_energy_means: list[float] = []
-    resetless_energy_sems: list[float] = []
-    for d in d_list:
-        layer_theta = get_theta_evenbly(d)
-        (energy_mean, energy_sem) = estimate_energy(
-            n,
-            d,
-            layer_theta,
-            sample_number,
-            resetless_shots,
-            resetless_time,
-            reset_count,
-            transpile_kwargs,
-        )
-        resetless_energy_means.append(energy_mean)
-        resetless_energy_sems.append(energy_sem)
-    # Calculate the z scores for the energies without reset
-    resetless_z_scores = [
-        (resetless_energy_means[index] - energy_list[index])
-        / resetless_energy_sems[index]
-        for index in range(len(d_list))
-    ]
-    # Assert that all the z scores are within 3 standard deviations of the mean
-    assert all([abs(z_score < 3) for z_score in resetless_z_scores])
-    # Print that the tests passed
-    print("Tests passed.")
 
 # %%
