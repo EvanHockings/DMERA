@@ -2,8 +2,9 @@
 
 from typing import Any
 from protocol import theta_evenbly, estimate_energy
-from qiskit import Aer  # type: ignore
+from qiskit import Aer, IBMQ  # type: ignore
 from qiskit.providers.fake_provider import FakeNairobi  # type: ignore
+
 
 MAIN = __name__ == "__main__"
 
@@ -14,16 +15,19 @@ if MAIN:
     """
     Simulation of the energy estimation and DMERA ground state preparation on FakeNairobi.
     The results aren't too much worse than the Aer simulator, but noise is still significant.
+    The Aer simulator takes ~6 times longer to run the circuits than FakeNairobi, which is very strange.
+    Reset also takes ~6 times longer on Nairobi than Oslo, which is also very strange and makes circuits with reset very awkward
     """
     # Initialise parameters
     n = 3
     d = 2
     sample_number = 6
-    shots = 10**2
+    shots = 10**4
     reset_time = 1
     reset_count = 1
     device_reset_configs = 4
     device_transpile_configs = 5
+    provider = IBMQ.load_account()
     device_backend = FakeNairobi()
     device_transpile_kwargs: dict[str, Any] = {
         "backend": device_backend,
@@ -75,7 +79,7 @@ if MAIN:
     simulator_z_score = (simulator_energy_mean - true_energy) / simulator_energy_sem
     # Print the results
     print(
-        f"\nWhere the true energy is {true_energy}, running the circuits on '{device_backend.name()}' gave an energy estimate of {device_energy_mean:.5f} and a z-score {device_z_score:.3f}, given the SEM {device_energy_sem:.5f}.\nThe same parameters for '{simulator_backend.name()}' gave an energy estimate of {simulator_energy_mean:.5f} and a z-score {simulator_z_score:.3f}, given the SEM {simulator_energy_sem:.5f}."
+        f"\nWhere the true energy is {true_energy}, running the circuits on '{device_backend.name()}' gave an energy estimate of {device_energy_mean:.5f} and a z-score of {device_z_score:.3f}, given the SEM of {device_energy_sem:.5f}.\nThe same parameters for '{simulator_backend.name()}' gave an energy estimate of {simulator_energy_mean:.5f} and a z-score of {simulator_z_score:.3f}, given the SEM of {simulator_energy_sem:.5f}."
     )
 
 # %%

@@ -10,10 +10,13 @@ from time import time
 from typing import Optional, Union, Any
 from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit, Aer  # type: ignore
 from qiskit.circuit import Parameter  # type: ignore
+from qiskit.circuit.library import XGate  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
-from qiskit.transpiler import PassManager  # type: ignore
+from qiskit.transpiler import PassManager, InstructionDurations  # type: ignore
+from qiskit.transpiler.passes import ALAPSchedule, DynamicalDecoupling  # type: ignore
 from qiskit.transpiler.basepasses import TransformationPass  # type: ignore
 from qiskit.dagcircuit import DAGCircuit  # type: ignore
+from qiskit.visualization.timeline import draw, IQXStandard  # type: ignore
 
 MAIN = __name__ == "__main__"
 
@@ -688,6 +691,20 @@ class RemoveDelays(TransformationPass):
         return dag
 
 
+def uhrig_pulse_spacing(k: int) -> list[float]:
+    """
+    Args:
+        k: Pulse sequence length
+    Returns:
+        spacing: Pulse spacing
+    """
+    spacing: list[float] = []
+    for i in range(k):
+        spacing.append(math.sin(math.pi * (i + 1) / (2 * k + 2)) ** 2 - sum(spacing))
+    spacing.append(1 - sum(spacing))
+    return spacing
+
+
 def device_operators(
     shots: int,
     bound_circuits: list[list[QuantumCircuit]],
@@ -695,6 +712,7 @@ def device_operators(
     transpile_configs: int,
     transpile_kwargs: dict[str, Any],
     print_diagnostics: bool = False,
+    dynamically_decouple: bool = True,
 ) -> list[float]:
     """
     Args:
@@ -704,12 +722,30 @@ def device_operators(
         transpile_configs: Number of random transpilation configurations to generate
         transpile_kwargs: Keyword arguments for circuit transpiling
         print_diagnostics: Print diagnostics
+        dynamically_decouple: Dynamically decouple the circuit
     Returns:
         operators: Estimated observable operator values
     """
     # If the circuits are being run on a device, we need to do a lot to ensure that the results are good
     backend = transpile_kwargs["backend"]
     remove_delays = PassManager(RemoveDelays())
+    # Set up the dynamical decoupling pass
+    if dynamically_decouple:
+        k = 8
+        dd_sequence = [XGate()] * k
+        dd_spacing = uhrig_pulse_spacing(k)
+        instruction_durations = InstructionDurations.from_backend(backend)
+        dynamically_decouple = PassManager(
+            [
+                ALAPSchedule(instruction_durations),
+                DynamicalDecoupling(
+                    instruction_durations,
+                    dd_sequence,
+                    qubits=None,
+                    spacing=dd_spacing,
+                ),
+            ]
+        )  # type: ignore
     assert all([len(circuit_list) == reset_configs for circuit_list in bound_circuits])
     start_time = time()
     best_circuits: list[QuantumCircuit] = []
@@ -730,10 +766,15 @@ def device_operators(
         # Remove delays and use mapomatic to determine the optimal layout
         deflated_circuit = mm.deflate_circuit(remove_delays.run(trial_circuits[best_arg]))  # type: ignore
         best_layout: tuple[list[int], str, float] = mm.best_overall_layout(deflated_circuit, backend)  # type: ignore
-        # Re-transpile the circuit with the optimal layout
-        best_circuit: QuantumCircuit = transpile(
-            deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs
-        )  # type: ignore
+        # Re-transpile the circuit with the optimal layout and then dynamically decouple if appropriate
+        if dynamically_decouple:
+            best_circuit: QuantumCircuit = dynamically_decouple.run(transpile(deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs))  # type: ignore
+            if print_diagnostics:
+                display(draw(best_circuit, style=IQXStandard(**{"formatter.general.fig_width": 40})))  # type: ignore
+        else:
+            best_circuit: QuantumCircuit = transpile(
+                deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs
+            )  # type: ignore
         best_circuits.append(best_circuit)
     end_time = time()
     if print_diagnostics:
@@ -830,15 +871,11 @@ def estimate_site_energy(
             operators[flattened_supports.index(site_support)]
             for site_support in sites_supports[site_index]
         ]
-        energy = site_operators[0] - 0.5 * (site_operators[1] + site_operators[2])
+        energy = site_operators[0] - (site_operators[1] + site_operators[2]) / 2
         energy_sem = math.sqrt(
             (
-                (1 + site_operators[0]) * (1 - site_operators[0]) / 4
-                + (
-                    (1 + site_operators[1]) * (1 - site_operators[1]) / 4
-                    + (1 + site_operators[2]) * (1 - site_operators[2]) / 4
-                )
-                / 4
+                (1 - site_operators[0] ** 2)
+                + ((1 - site_operators[1] ** 2) + (1 - site_operators[2] ** 2)) / 4
             )
             / shots
         )
@@ -917,10 +954,8 @@ def estimate_energy(
     energy_sem_shots: float = np.sqrt(
         sum(np.array(sites_energy_sem) ** 2) / (len(sites_energy) ** 2)
     ).item()
-    energy_sem_sample_number: float = np.sqrt(
-        np.var(sites_energy) / len(sites_energy)
-    ).item()
-    energy_sem: float = math.sqrt(energy_sem_shots**2 + energy_sem_sample_number**2)
+    energy_sem_var: float = np.sqrt(np.var(sites_energy) / len(sites_energy)).item()
+    energy_sem: float = math.sqrt(energy_sem_shots**2 + energy_sem_var**2)
     if print_diagnostics:
         print(
             f"The average energy per site is {energy_mean:.5f} with a standard error of the mean {energy_sem:.5f}."
