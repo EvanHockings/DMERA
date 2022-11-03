@@ -20,7 +20,7 @@ if MAIN:
     n = 3
     d_list = [2, 4, 5]
     sample_number = 6
-    reset_shots = 10**2
+    reset_shots = 10**3
     reset_time = 1
     resetless_shots = 10**4
     resetless_time = None
