@@ -512,7 +512,7 @@ def dmera_reset_circuits(
                 )
             # Add barriers to the circuit for ease of readability
             if barriers and layer_index != l - 1:
-                quantum_circuits[reset_idx].barrier()
+                quantum_circuits[reset_idx].barrier()  # type: ignore
             # Reset the appropriate qubits
             for qubit in reset_circuits[reset_idx][1 + layer_index]:
                 for _ in range(reset_count):

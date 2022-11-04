@@ -20,7 +20,7 @@ if MAIN:
     n = 3
     d_list = [2, 4, 5]
     sample_number = 6
-    reset_shots = 10**3
+    reset_shots = 10**2
     reset_time = 1
     resetless_shots = 10**4
     resetless_time = None
@@ -53,7 +53,6 @@ if MAIN:
             transpile_kwargs,
             print_diagnostics,
         )
-        print(energy_mean)
         reset_energy_means.append(energy_mean)
         reset_energy_sems.append(energy_sem)
     # Calculate the z-scores for the energies with reset
