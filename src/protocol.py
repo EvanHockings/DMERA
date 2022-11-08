@@ -309,28 +309,12 @@ def dmera_resets(
 # %%
 
 
-def theta(d: int) -> tuple[dict[int, Parameter], dict[Parameter, float]]:
-    """
-    Args:
-        d: Depth at each scale
-    Returns:
-        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
-        theta_values: Dictionary of Qiskit parameter values for each parameter
-    """
-    theta_dict: dict[int, Parameter] = {}
-    theta_values: dict[Parameter, float] = {}
-    for layer_index in range(d):
-        theta_dict[layer_index] = Parameter(f"theta({layer_index})")
-        theta_values[theta_dict[layer_index]] = 0.0
-    return (theta_dict, theta_values)
-
-
 def theta_evenbly(d: int) -> list[float]:
     """
     Args:
         d: Depth at each scale
     Returns:
-        layer_theta: Angles supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
+        theta_values: Angles supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     """
     theta_evenbly_2 = [math.pi / 12, -math.pi / 6]
     theta_evenbly_4 = [
@@ -347,17 +331,17 @@ def theta_evenbly(d: int) -> list[float]:
         0.157462489552395,
     ]
     if d == 2:
-        layer_theta = theta_evenbly_2
+        theta_values = theta_evenbly_2
     elif d == 4:
-        layer_theta = theta_evenbly_4
+        theta_values = theta_evenbly_4
     elif d == 5:
-        layer_theta = theta_evenbly_5
+        theta_values = theta_evenbly_5
     else:
         print(
             f"No cached values for theta when d = {d}. Falling back and setting all thetas to be zero."
         )
-        layer_theta = [0.0] * d
-    return layer_theta
+        theta_values = [0.0] * d
+    return theta_values
 
 
 # %%
@@ -369,7 +353,7 @@ def dmera_reset_circuits(
     pcc_circuit: list[list[tuple[int, int]]],
     sites_list: list[list[int]],
     support: list[int],
-    theta_dict: dict[int, Parameter],
+    theta_values: list[float],
     reset_count: int,
     reset_configs: int,
     reset_circuits: list[list[list[int]]],
@@ -385,7 +369,7 @@ def dmera_reset_circuits(
         pcc_circuit: DMERA past causal cone circuit of the observable
         sites_list: List of the sites at each scale
         support: Support of the observable
-        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
+        theta_values: Gate angles for each layer in each scale
         reset_count: Number of reset operations to perform a reset
         reset_configs: Number of random reset configurations to generate
         reset_circuits: Qubits which are reset in each layer for each of the reset configurations
@@ -425,8 +409,8 @@ def dmera_reset_circuits(
             for _ in range(reset_count):
                 quantum_circuits[reset_idx].reset(inverse_maps[reset_idx][qubit])
     # Initialise the gates in the quantum circuit
-    gate_list = [w(theta_dict[0]).to_gate()] + [
-        u(theta_dict[layer_index]).to_gate() for layer_index in range(1, d)
+    gate_list = [w(theta_values[0]).to_gate()] + [
+        u(theta_values[layer_index]).to_gate() for layer_index in range(1, d)
     ]
     # Populate the quantum circuit with gates and reset
     for (layer_index, layer) in enumerate(pcc_circuit):
@@ -458,21 +442,21 @@ def dmera_reset_circuits(
 def transverse_ising_circuits(
     n: int,
     d: int,
+    theta_values: list[float],
     sample_number: int,
     reset_time: Optional[int],
     reset_count: int,
     reset_configs: int,
     print_diagnostics: bool = False,
 ) -> tuple[
-    dict[Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]],
-    list[int],
-    dict[int, Parameter],
-    dict[Parameter, float],
+    dict[Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]], list[int]
 ]:
     """
     Args:
         n: Number of scales
         d: Depth at each scale
+        theta_values: Gate angles for each layer in each scale
+        sample_number: Number of samples to take
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
         reset_count: Number of reset operations to perform a reset
         reset_configs: Number of random reset configurations to generate
@@ -480,14 +464,11 @@ def transverse_ising_circuits(
     Returns:
         operator_circuits: Dictionary of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations, indexed by the support of the observables
         sites: The local observables of these sites are measured by the circuits
-        theta_dict: Dictonary of Qiskit parameters for each layer in each scale
-        theta_values: Dictionary of Qiskit parameter values for each parameter
     """
     # Initialise the circuit and variational parameters
     l = n * d
     qubits = 3 * 2**n
     (circuit, sites_list) = dmera(n, d)
-    (theta_dict, theta_values) = theta(d)
     assert l == len(circuit)
     # Generate the supports
     sites = sorted(random.sample(range(qubits), sample_number))
@@ -527,7 +508,7 @@ def transverse_ising_circuits(
             pcc_circuit,
             sites_list,
             list_support,
-            theta_dict,
+            theta_values,
             reset_count,
             reset_configs,
             reset_circuits,
@@ -560,7 +541,7 @@ def transverse_ising_circuits(
         print(
             f"The maximum number of qubits required for any of the DMERA past causal cone circuits is {max(qubit_numbers)}, where the number of scales is {n}, the depth at each scale is {d}, the reset time is {reset_time}, and the reset count is {reset_count}."
         )
-    return (operator_circuits, sites, theta_dict, theta_values)
+    return (operator_circuits, sites)
 
 
 # %%
@@ -568,14 +549,14 @@ def transverse_ising_circuits(
 
 def simulator_operators(
     shots: int,
-    bound_circuits: list[list[QuantumCircuit]],
+    decomposed_circuits: list[list[QuantumCircuit]],
     transpile_kwargs: dict[str, Any],
     print_diagnostics: bool = False,
 ) -> list[float]:
     """
     Args:
         shots: Number of shots to measure for each circuit
-        bound_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters for each of the observables
+        decomposed_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters for each of the observables
         transpile_kwargs: Keyword arguments for circuit transpiling
         print_diagnostics: Print diagnostics
     Returns:
@@ -584,7 +565,7 @@ def simulator_operators(
     # If the circuits are being simulated, we don't need to worry about their quality
     backend = transpile_kwargs["backend"]
     start_time = time()
-    best_circuits: list[QuantumCircuit] = transpile([circuit_list[0] for circuit_list in bound_circuits], **transpile_kwargs)  # type: ignore
+    best_circuits: list[QuantumCircuit] = transpile([circuit_list[0] for circuit_list in decomposed_circuits], **transpile_kwargs)  # type: ignore
     end_time = time()
     if print_diagnostics:
         print(f"Transpiling the circuits took {end_time - start_time} s.")
@@ -639,7 +620,7 @@ def uhrig_pulse_spacing(k: int) -> list[float]:
 
 def device_operators(
     shots: int,
-    bound_circuits: list[list[QuantumCircuit]],
+    decomposed_circuits: list[list[QuantumCircuit]],
     reset_configs: int,
     transpile_configs: int,
     transpile_kwargs: dict[str, Any],
@@ -649,7 +630,7 @@ def device_operators(
     """
     Args:
         shots: Number of shots to measure for each circuit
-        bound_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters
+        decomposed_circuits: List of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations with bound parameters
         reset_configs: Number of random reset configurations to generate
         transpile_configs: Number of random transpilation configurations to generate
         transpile_kwargs: Keyword arguments for circuit transpiling
@@ -678,10 +659,12 @@ def device_operators(
                 ),
             ]
         )  # type: ignore
-    assert all([len(circuit_list) == reset_configs for circuit_list in bound_circuits])
+    assert all(
+        [len(circuit_list) == reset_configs for circuit_list in decomposed_circuits]
+    )
     start_time = time()
     best_circuits: list[QuantumCircuit] = []
-    for circuit_list in bound_circuits:
+    for circuit_list in decomposed_circuits:
         # Generate a large set of circuits
         trial_circuits: list[QuantumCircuit] = transpile(
             circuit_list * transpile_configs, **transpile_kwargs
@@ -739,7 +722,6 @@ def estimate_site_energy(
         Union[tuple[int, int], tuple[int, int, int]], list[QuantumCircuit]
     ],
     sites: list[int],
-    theta_values: dict[Parameter, float],
     reset_configs: int,
     transpile_configs: int,
     transpile_kwargs: dict[str, Any],
@@ -751,7 +733,6 @@ def estimate_site_energy(
         shots: Number of shots to measure for each circuit
         operator_circuits: Dictionary of lists of Qiskit circuits implementing the DMERA circuit with reset for each of the reset configurations, indexed by the support of the observables
         sites: The local observables of these sites are measured by the circuits
-        theta_values: Dictionary of Qiskit parameter values for each parameter
         reset_configs: Number of random reset configurations to generate
         transpile_configs: Number of random transpilation configurations to generate
         transpile_kwargs: Keyword arguments for circuit transpiling
@@ -773,23 +754,20 @@ def estimate_site_energy(
     flattened_supports: list[Union[tuple[int, int], tuple[int, int, int]]] = sorted(
         list(set([support for supports in sites_supports for support in supports]))
     )
-    # Bind the parameters for the circuits
-    bound_circuits: list[list[QuantumCircuit]] = [
-        [
-            circuit.decompose().bind_parameters(theta_values)
-            for circuit in operator_circuits[site_support]
-        ]
+    # Decompose the circuits
+    decomposed_circuits: list[list[QuantumCircuit]] = [
+        [circuit.decompose() for circuit in operator_circuits[site_support]]
         for site_support in flattened_supports
     ]
     # Transpile and run the circuits
     if transpile_kwargs["backend"].name()[0:3] == "aer":
         operators = simulator_operators(
-            shots, bound_circuits, transpile_kwargs, print_diagnostics
+            shots, decomposed_circuits, transpile_kwargs, print_diagnostics
         )
     else:
         operators = device_operators(
             shots,
-            bound_circuits,
+            decomposed_circuits,
             reset_configs,
             transpile_configs,
             transpile_kwargs,
@@ -822,7 +800,7 @@ def estimate_site_energy(
 def estimate_energy(
     n: int,
     d: int,
-    layer_theta: list[float],
+    theta_values: list[float],
     sample_number: int,
     shots: int,
     reset_time: Optional[int],
@@ -836,7 +814,7 @@ def estimate_energy(
     Args:
         n: Number of scales
         d: Depth at each scale
-        layer_theta: Theta values for the layers in each scale
+        theta_values: Gate angles for each layer in each scale
         sample_number: Number of sites to sample the energy from
         shots: Number of shots to measure for each circuit
         reset_time: Time taken to perform a reset operation as a multiple of the time taken for a circuit layer
@@ -856,15 +834,12 @@ def estimate_energy(
         transpile_configs = 1
     # Generate the circuits
     start_time = time()
-    (operator_circuits, sites, theta_dict, theta_values,) = transverse_ising_circuits(
-        n, d, sample_number, reset_time, reset_count, reset_configs
+    (operator_circuits, sites) = transverse_ising_circuits(
+        n, d, theta_values, sample_number, reset_time, reset_count, reset_configs
     )
     end_time = time()
     if print_diagnostics:
         print(f"Generating the circuits took {end_time - start_time} s.")
-    # Set the theta values
-    for layer_index in range(d):
-        theta_values[theta_dict[layer_index]] = layer_theta[layer_index]
     # Estimate the energy of the sites
     start_time = time()
     (sites_energy, sites_energy_sem) = estimate_site_energy(
@@ -872,7 +847,6 @@ def estimate_energy(
         shots,
         operator_circuits,
         sites,
-        theta_values,
         reset_configs,
         transpile_configs,
         transpile_kwargs,
