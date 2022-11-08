@@ -31,7 +31,7 @@ if MAIN:
     device_backend = FakeNairobi()
     device_transpile_kwargs: dict[str, Any] = {
         "backend": device_backend,
-        "optimization_level": 3,
+        "optimization_level": 2,
         "scheduling_method": "alap",
         "layout_method": "sabre",
         "routing_method": "sabre",

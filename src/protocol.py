@@ -9,11 +9,10 @@ from copy import deepcopy
 from time import time
 from typing import Optional, Union, Any
 from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit, Aer  # type: ignore
-from qiskit.circuit import Parameter  # type: ignore
 from qiskit.circuit.library import XGate  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
 from qiskit.transpiler import PassManager, InstructionDurations  # type: ignore
-from qiskit.transpiler.passes import ALAPSchedule, DynamicalDecoupling  # type: ignore
+from qiskit.transpiler.passes import ALAPSchedule, DynamicalDecoupling, RZXCalibrationBuilder  # type: ignore
 from qiskit.transpiler.basepasses import TransformationPass  # type: ignore
 from qiskit.dagcircuit import DAGCircuit  # type: ignore
 from qiskit.visualization.timeline import draw, IQXStandard  # type: ignore
@@ -642,6 +641,13 @@ def device_operators(
     # If the circuits are being run on a device, we need to do a lot to ensure that the results are good
     backend = transpile_kwargs["backend"]
     remove_delays = PassManager(RemoveDelays())
+    rzx_calibrate = PassManager(
+        RZXCalibrationBuilder(
+            instruction_schedule_map=backend.defaults().instruction_schedule_map
+        )
+    )
+    if print_diagnostics:
+        display(decomposed_circuits[0][0].draw("mpl"))  # type: ignore
     # Set up the dynamical decoupling pass
     if dynamically_decouple:
         k = 8
@@ -665,9 +671,11 @@ def device_operators(
     start_time = time()
     best_circuits: list[QuantumCircuit] = []
     for circuit_list in decomposed_circuits:
+        # Calibrate the circuits for R_ZX pulses
+        calibrated_list: list[QuantumCircuit] = rzx_calibrate.run(circuit_list)  # type: ignore
         # Generate a large set of circuits
         trial_circuits: list[QuantumCircuit] = transpile(
-            circuit_list * transpile_configs, **transpile_kwargs
+            calibrated_list * transpile_configs, **transpile_kwargs
         )  # type: ignore
         durations = [circuit.duration for circuit in trial_circuits]
         cx_counts = [len(circuit.get_instructions("cx")) for circuit in trial_circuits]
