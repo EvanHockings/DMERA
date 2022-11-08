@@ -18,6 +18,8 @@ from qiskit.transpiler.basepasses import TransformationPass  # type: ignore
 from qiskit.dagcircuit import DAGCircuit  # type: ignore
 from qiskit.visualization.timeline import draw, IQXStandard  # type: ignore
 
+from protocol_gates import w, u, q  # type: ignore
+
 MAIN = __name__ == "__main__"
 
 
@@ -307,76 +309,6 @@ def dmera_resets(
 # %%
 
 
-def w(param: Parameter) -> QuantumCircuit:
-    """
-    Args:
-        param: A Qiskit parameter
-    Returns:
-        w_gate: A Qiskit circuit representing the w(param) gate
-    """
-    w_gate = QuantumCircuit(2, name="w")
-    w_gate.h([0, 1])
-    w_gate.cz(0, 1)
-    w_gate.sdg([0, 1])
-    w_gate.h([0, 1])
-    w_gate.rz(param - math.pi / 2, 0)
-    w_gate.rz(param, 1)
-    w_gate.h([0, 1])
-    w_gate.s([0, 1])
-    w_gate.cz(0, 1)
-    w_gate.h([0, 1])
-    return w_gate
-
-
-def u(param: Parameter) -> QuantumCircuit:
-    """
-    Args:
-        param: A Qiskit parameter
-    Returns:
-        u_gate: A Qiskit circuit representing the u(param) gate
-    """
-    u_gate = QuantumCircuit(2, name="u")
-    u_gate.h([0, 1])
-    u_gate.cz(0, 1)
-    u_gate.sdg([0, 1])
-    u_gate.h([0, 1])
-    u_gate.rz(param, 0)
-    u_gate.rz(param, 1)
-    u_gate.h([0, 1])
-    u_gate.s([0, 1])
-    u_gate.cz(0, 1)
-    u_gate.h([0, 1])
-    return u_gate
-
-
-def q() -> QuantumCircuit:
-    """
-    Returns:
-        q_gate: A Qiskit circuit representing the q initialisation gate
-    """
-    q_gate = QuantumCircuit(3, name="q")
-    init_state: list[float] = [
-        1 / math.sqrt(109),
-        0.0,
-        0.0,
-        6 / math.sqrt(109),
-        0.0,
-        6 / math.sqrt(109),
-        6 / math.sqrt(109),
-        0.0,
-    ]
-    q_gate.initialize(init_state, [0, 1, 2])  # type: ignore
-    q_gate = transpile(
-        q_gate.decompose(),
-        backend=Aer.get_backend("aer_simulator"),
-        optimization_level=3,
-    )
-    return q_gate  # type: ignore
-
-
-# %%
-
-
 def theta(d: int) -> tuple[dict[int, Parameter], dict[Parameter, float]]:
     """
     Args:
@@ -444,7 +376,7 @@ def dmera_reset_circuits(
     reset_maps: list[dict[tuple[int, int], int]],
     inverse_maps: list[dict[int, int]],
     barriers: bool = False,
-    reverse_gate: bool = True,
+    reverse_gate: bool = False,
 ) -> list[QuantumCircuit]:
     """
     Args:
