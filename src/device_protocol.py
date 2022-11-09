@@ -46,12 +46,12 @@ if MAIN:
     print_diagnostics = True
     # Energy supplied in Entanglement renormalization and wavelets by Evenbly and White (2016)
     true_energy = -1.24212
-    layer_theta = theta_evenbly(d)
+    theta_values = theta_evenbly(d)
     # Estimate the energy on the device
     (device_energy_mean, device_energy_sem) = estimate_energy(
         n,
         d,
-        layer_theta,
+        theta_values,
         sample_number,
         shots,
         reset_time,
@@ -66,7 +66,7 @@ if MAIN:
     (simulator_energy_mean, simulator_energy_sem) = estimate_energy(
         n,
         d,
-        layer_theta,
+        theta_values,
         sample_number,
         shots,
         reset_time,

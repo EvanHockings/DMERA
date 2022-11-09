@@ -7,9 +7,9 @@ from qiskit.circuit import Parameter  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
 from qiskit.quantum_info import XXDecomposer  # type: ignore
 from qiskit.transpiler import PassManager  # type: ignore
-from qiskit.transpiler.passes import Optimize1qGatesDecomposition, BasisTranslator  # type: ignore
+from qiskit.transpiler.passes import Optimize1qGatesDecomposition, BasisTranslator, RZXCalibrationBuilder  # type: ignore
 from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary  # type: ignore
-
+from qiskit.providers.fake_provider import FakeNairobi  # type: ignore
 
 MAIN = __name__ == "__main__"
 
@@ -91,7 +91,7 @@ def w(theta: float) -> QuantumCircuit:
 
 
 if MAIN:
-    theta_range = np.linspace(0, 2 * np.pi, 101)
+    theta_range = np.linspace(-np.pi, np.pi, 101)
     theta_param = Parameter("theta")
     r_zx_angle_w = []
     for theta in theta_range:
@@ -100,8 +100,8 @@ if MAIN:
         w_decomp = w(theta)
         w_unitary_decomp = get_unitary(w_decomp)
         assert np.allclose(w_unitary_orig, w_unitary_decomp, atol=1e-7)  # type: ignore
-        r_zx_angle_w.append(sum(gate.operation.params[0] for gate in w_decomp.get_instructions("rzx")) / np.pi)  # type: ignore
-    print(f"The total accumulated rotation angle for the R_ZX gates in units of pi has maximum {max(r_zx_angle_w):.2f}, minimum {min(r_zx_angle_w):.2f}, mean {np.mean(r_zx_angle_w):.2f}, and median {np.median(r_zx_angle_w):.2f}. Note that a CX gate corresponds to an angle 0.50.")  # type: ignore
+        r_zx_angle_w.append(sum(abs(gate.operation.params[0]) for gate in w_decomp.get_instructions("rzx")) / np.pi)  # type: ignore
+    print(f"For w(theta), the total accumulated rotation angle for the R_ZX gates in multiples of pi has maximum {max(r_zx_angle_w):.2f}, minimum {min(r_zx_angle_w):.2f}, mean {np.mean(r_zx_angle_w):.2f}, and median {np.median(r_zx_angle_w):.2f}. Note that a CX gate corresponds to an angle 0.50.")  # type: ignore
 
 
 # %%
@@ -162,7 +162,7 @@ def u(theta: float) -> QuantumCircuit:
 
 
 if MAIN:
-    theta_range = np.linspace(0, 2 * np.pi, 101)
+    theta_range = np.linspace(-np.pi, np.pi, 101)
     theta_param = Parameter("theta")
     r_zx_angle_u = []
     for theta in theta_range:
@@ -171,8 +171,8 @@ if MAIN:
         u_decomp = u(theta)
         u_unitary_decomp = get_unitary(u_decomp)
         assert np.allclose(u_unitary_orig, u_unitary_decomp, atol=1e-7)  # type: ignore
-        r_zx_angle_u.append(sum(gate.operation.params[0] for gate in u_decomp.get_instructions("rzx")) / np.pi)  # type: ignore
-    print(f"The total accumulated rotation angle for the R_ZX gates in units of pi has maximum {max(r_zx_angle_u):.2f}, minimum {min(r_zx_angle_u):.2f}, mean {np.mean(r_zx_angle_u):.2f}, and median {np.median(r_zx_angle_u):.2f}. Note that a CX gate corresponds to an angle 0.50.")  # type: ignore
+        r_zx_angle_u.append(sum(abs(gate.operation.params[0]) for gate in u_decomp.get_instructions("rzx")) / np.pi)  # type: ignore
+    print(f"For u(theta), the total accumulated rotation angle for the R_ZX gates in multiples of pi has maximum {max(r_zx_angle_u):.2f}, minimum {min(r_zx_angle_u):.2f}, mean {np.mean(r_zx_angle_u):.2f}, and median {np.median(r_zx_angle_u):.2f}. Note that a CX gate corresponds to an angle 0.50.")  # type: ignore
 
 
 # %%
@@ -229,6 +229,31 @@ if MAIN:
     statevector_decomp = result_decomp.get_statevector()
     assert np.allclose(statevector_orig, statevector_decomp, atol=1e-7)  # type: ignore
     print(f"The original q gate uses {q_orig_cx} CX gates, whereas the decomposed q gate uses {q_decomp_cx} CX gates.")  # type: ignore
+
+
+# %%
+
+
+if MAIN:
+    backend = FakeNairobi()
+    rzx_calibrate = PassManager(RZXCalibrationBuilder(backend.defaults().instruction_schedule_map, backend.configuration().qubit_channel_mapping))  # type: ignore
+    w_test = rzx_calibrate.run(w(np.pi / 12))  # type: ignore
+    u_test = rzx_calibrate.run(u(-np.pi / 6))  # type: ignore
+    rzx_w: list[float] = []
+    rzx_u: list[float] = []
+    optimization_levels = [0, 1, 2, 3]
+    for optimization_level in optimization_levels:
+        w_transpiled = transpile(
+            w_test, backend=backend, optimization_level=optimization_level
+        )
+        u_transpiled = transpile(
+            u_test, backend=backend, optimization_level=optimization_level
+        )
+        rzx_w.append((sum(abs(gate.operation.params[0]) for gate in w_test.get_instructions("rzx")) - sum(abs(gate.operation.params[0]) for gate in w_transpiled.get_instructions("rzx"))) / np.pi)  # type: ignore
+        rzx_u.append((sum(abs(gate.operation.params[0]) for gate in u_test.get_instructions("rzx")) - sum(abs(gate.operation.params[0]) for gate in u_transpiled.get_instructions("rzx"))) / np.pi)  # type: ignore
+    print(
+        f"For optimisation levels {optimization_levels}, the differences in the total accumulated rotation angle for the R_ZX gates in multiples of pi for w(theta) are {[float(f'{theta:.4f}') for theta in rzx_w]}, and for u(theta) are {[float(f'{theta:.4f}') for theta in rzx_u]}. That is, the RZX gates are turned into CX gates when the optimisation level is 3."
+    )
 
 
 # %%

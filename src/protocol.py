@@ -640,14 +640,15 @@ def device_operators(
     """
     # If the circuits are being run on a device, we need to do a lot to ensure that the results are good
     backend = transpile_kwargs["backend"]
+    trimmed_kwargs = deepcopy(transpile_kwargs)
+    trimmed_kwargs.pop("layout_method", None)
     remove_delays = PassManager(RemoveDelays())
     rzx_calibrate = PassManager(
         RZXCalibrationBuilder(
-            instruction_schedule_map=backend.defaults().instruction_schedule_map
+            backend.defaults().instruction_schedule_map,
+            backend.configuration().qubit_channel_mapping,
         )
     )
-    if print_diagnostics:
-        display(decomposed_circuits[0][0].draw("mpl"))  # type: ignore
     # Set up the dynamical decoupling pass
     if dynamically_decouple:
         k = 8
@@ -691,12 +692,16 @@ def device_operators(
         best_layout: tuple[list[int], str, float] = mm.best_overall_layout(deflated_circuit, backend)  # type: ignore
         # Re-transpile the circuit with the optimal layout and then dynamically decouple if appropriate
         if dynamically_decouple:
-            best_circuit: QuantumCircuit = dynamically_decouple.run(transpile(deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs))  # type: ignore
+            best_circuit: QuantumCircuit = dynamically_decouple.run(transpile(deflated_circuit, initial_layout=best_layout[0], **trimmed_kwargs))  # type: ignore
             if print_diagnostics:
+                # TODO: Fix this up when I've sorted out the RZXCalibrationBuilder
+                display(calibrated_list[0].draw("mpl"))  # type: ignore
+                display(trial_circuits[0].draw("mpl"))  # type: ignore
+                display(deflated_circuit.draw("mpl"))  # type: ignore
                 display(draw(best_circuit, style=IQXStandard(**{"formatter.general.fig_width": 40})))  # type: ignore
         else:
             best_circuit: QuantumCircuit = transpile(
-                deflated_circuit, initial_layout=best_layout[0], **transpile_kwargs
+                deflated_circuit, initial_layout=best_layout[0], **trimmed_kwargs
             )  # type: ignore
         best_circuits.append(best_circuit)
     end_time = time()

@@ -39,11 +39,11 @@ if MAIN:
     reset_energy_means: list[float] = []
     reset_energy_sems: list[float] = []
     for d in d_list:
-        layer_theta = theta_evenbly(d)
+        theta_values = theta_evenbly(d)
         (energy_mean, energy_sem) = estimate_energy(
             n,
             d,
-            layer_theta,
+            theta_values,
             sample_number,
             reset_shots,
             reset_time,
@@ -66,11 +66,11 @@ if MAIN:
     resetless_energy_means: list[float] = []
     resetless_energy_sems: list[float] = []
     for d in d_list:
-        layer_theta = theta_evenbly(d)
+        theta_values = theta_evenbly(d)
         (energy_mean, energy_sem) = estimate_energy(
             n,
             d,
-            layer_theta,
+            theta_values,
             sample_number,
             resetless_shots,
             resetless_time,
