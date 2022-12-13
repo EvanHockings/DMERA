@@ -2,12 +2,14 @@
 
 import numpy as np
 from copy import deepcopy
+from typing import Any
 from qiskit import QuantumCircuit, Aer  # type: ignore
 from qiskit.circuit import Parameter  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
 from qiskit.quantum_info import XXDecomposer  # type: ignore
 from qiskit.transpiler import PassManager  # type: ignore
-from qiskit.transpiler.passes import Optimize1qGatesDecomposition, BasisTranslator, RZXCalibrationBuilder  # type: ignore
+from qiskit.transpiler.passes import FullAncillaAllocation, Optimize1qGatesDecomposition, BasisTranslator, RZXCalibrationBuilder  # type: ignore
+from qiskit.transpiler.coupling import CouplingMap  # type: ignore
 from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary  # type: ignore
 from qiskit.providers.fake_provider import FakeNairobi  # type: ignore
 
@@ -36,20 +38,20 @@ def get_unitary(quantum_circuit: QuantumCircuit) -> list[list[float]]:
 # %%
 
 
-def w_original(param: Parameter) -> QuantumCircuit:
+def w_original(theta: float) -> QuantumCircuit:
     """
     Args:
-        param: A Qiskit parameter
+        theta: A rotation angle
     Returns:
-        w_gate: A Qiskit circuit representing the w(param) gate
+        w_gate: A Qiskit circuit representing the w(theta) gate
     """
     w_gate = QuantumCircuit(2, name="w")
     w_gate.h([0, 1])
     w_gate.cz(0, 1)
     w_gate.sdg([0, 1])
     w_gate.h([0, 1])
-    w_gate.rz(param, 0)
-    w_gate.rz(param - np.pi / 2, 1)
+    w_gate.rz(theta, 0)
+    w_gate.rz(theta - np.pi / 2, 1)
     w_gate.h([0, 1])
     w_gate.s([0, 1])
     w_gate.cz(0, 1)
@@ -95,7 +97,7 @@ if MAIN:
     theta_param = Parameter("theta")
     r_zx_angle_w = []
     for theta in theta_range:
-        w_orig = w_original(theta_param).bind_parameters({theta_param: theta})
+        w_orig = w_original(theta)
         w_unitary_orig = get_unitary(w_orig)
         w_decomp = w(theta)
         w_unitary_decomp = get_unitary(w_decomp)
@@ -107,20 +109,20 @@ if MAIN:
 # %%
 
 
-def u_original(param: Parameter) -> QuantumCircuit:
+def u_original(theta: float) -> QuantumCircuit:
     """
     Args:
-        param: A Qiskit parameter
+        theta: A rotation angle
     Returns:
-        u_gate: A Qiskit circuit representing the u(param) gate
+        u_gate: A Qiskit circuit representing the u(theta) gate
     """
     u_gate = QuantumCircuit(2, name="u")
     u_gate.h([0, 1])
     u_gate.cz(0, 1)
     u_gate.sdg([0, 1])
     u_gate.h([0, 1])
-    u_gate.rz(param, 0)
-    u_gate.rz(param, 1)
+    u_gate.rz(theta, 0)
+    u_gate.rz(theta, 1)
     u_gate.h([0, 1])
     u_gate.s([0, 1])
     u_gate.cz(0, 1)
@@ -128,15 +130,32 @@ def u_original(param: Parameter) -> QuantumCircuit:
     return u_gate
 
 
-def u(theta: float) -> QuantumCircuit:
+def u(theta: float, backend: Any = None) -> QuantumCircuit:
     """
     Args:
         theta: A rotation angle
     Returns:
         u_gate: A Qiskit circuit representing the u(theta) gate
     """
+    if backend is None:
+        backend = FakeNairobi()
     # Set up the decomposer and pass
     xx_decomposer = XXDecomposer()
+    # pm = PassManager(
+    #     [
+    #         SetLayout(self.layout),
+    #         FullAncillaAllocation(CouplingMap(backend.configuration().coupling_map)),
+    #         BasisTranslator(
+    #             SessionEquivalenceLibrary,
+    #             ["id", "rz", "sx", "x", "rzx", "cx", "reset"],
+    #         ),
+    #         Optimize1qGatesDecomposition(["id", "rz", "sx", "x", "rzx", "cx", "reset"]),
+    #         RZXCalibrationBuilder(
+    #             backend.defaults().instruction_schedule_map,
+    #             backend.configuration().qubit_channel_mapping,
+    #         ),
+    #     ]
+    # )
     pm = PassManager(
         [
             BasisTranslator(
@@ -166,7 +185,7 @@ if MAIN:
     theta_param = Parameter("theta")
     r_zx_angle_u = []
     for theta in theta_range:
-        u_orig = u_original(theta_param).bind_parameters({theta_param: theta})
+        u_orig = u_original(theta)
         u_unitary_orig = get_unitary(u_orig)
         u_decomp = u(theta)
         u_unitary_decomp = get_unitary(u_decomp)
@@ -238,7 +257,9 @@ if MAIN:
     backend = FakeNairobi()
     rzx_calibrate = PassManager(RZXCalibrationBuilder(backend.defaults().instruction_schedule_map, backend.configuration().qubit_channel_mapping))  # type: ignore
     w_test = rzx_calibrate.run(w(np.pi / 12))  # type: ignore
-    u_test = rzx_calibrate.run(u(-np.pi / 6))  # type: ignore
+    u_test = rzx_calibrate.run(u(-np.pi / 6, backend))  # type: ignore
+    w_test.measure_all()  # type: ignore
+    u_test.measure_all()  # type: ignore
     rzx_w: list[float] = []
     rzx_u: list[float] = []
     optimization_levels = [0, 1, 2, 3]
@@ -249,6 +270,11 @@ if MAIN:
         u_transpiled = transpile(
             u_test, backend=backend, optimization_level=optimization_level
         )
+        # display(w_transpiled.draw("mpl"))
+        w_job = backend.run(w_transpiled, shots=1e4)  # type: ignore
+        w_results = w_job.result().get_counts()  # type: ignore
+        u_job = backend.run(u_transpiled, shots=1e4)  # type: ignore
+        u_results = u_job.result().get_counts()  # type: ignore
         rzx_w.append((sum(abs(gate.operation.params[0]) for gate in w_test.get_instructions("rzx")) - sum(abs(gate.operation.params[0]) for gate in w_transpiled.get_instructions("rzx"))) / np.pi)  # type: ignore
         rzx_u.append((sum(abs(gate.operation.params[0]) for gate in u_test.get_instructions("rzx")) - sum(abs(gate.operation.params[0]) for gate in u_transpiled.get_instructions("rzx"))) / np.pi)  # type: ignore
     print(
@@ -257,3 +283,40 @@ if MAIN:
 
 
 # %%
+
+
+if MAIN:
+    backend = FakeNairobi()
+    rzx_calibrate = PassManager(RZXCalibrationBuilder(backend.defaults().instruction_schedule_map, backend.configuration().qubit_channel_mapping))  # type: ignore
+    w_test = w_original(np.pi / 12)  # type: ignore
+    u_test = u_original(-np.pi / 6)  # type: ignore
+    w_test.measure_all()
+    u_test.measure_all()
+    rzx_w: list[float] = []
+    rzx_u: list[float] = []
+    optimization_levels = [0, 1, 2, 3]
+    for optimization_level in optimization_levels:
+        w_transpiled = transpile(
+            w_test, backend=backend, optimization_level=optimization_level
+        )
+        u_transpiled = transpile(
+            u_test, backend=backend, optimization_level=optimization_level
+        )
+        # display(w_transpiled.draw("mpl"))
+        w_job = backend.run(w_transpiled, shots=1e4)  # type: ignore
+        w_results = w_job.result().get_counts()  # type: ignore
+        u_job = backend.run(u_transpiled, shots=1e4)  # type: ignore
+        u_results = u_job.result().get_counts()  # type: ignore
+        rzx_w.append(len(w_transpiled.get_instructions("cx")))  # type: ignore
+        rzx_u.append(len(u_transpiled.get_instructions("cx")))  # type: ignore
+    print(
+        f"For optimisation levels {optimization_levels}, the number of CX gates for w(theta) are {[float(f'{theta:.4f}') for theta in rzx_w]}, and for u(theta) are {[float(f'{theta:.4f}') for theta in rzx_u]}."
+    )
+
+
+# %%
+
+"""
+Note that we can get the PassManager for certain optimisation levels using this:
+https://qiskit.org/documentation/stubs/qiskit.transpiler.preset_passmanagers.generate_preset_pass_manager.html
+"""

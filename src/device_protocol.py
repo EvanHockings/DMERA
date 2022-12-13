@@ -28,10 +28,11 @@ if MAIN:
     device_reset_configs = 4
     device_transpile_configs = 5
     provider = IBMQ.load_account()
-    device_backend = FakeNairobi()
+    device_backend = provider.get_backend("ibm_oslo")
     device_transpile_kwargs: dict[str, Any] = {
         "backend": device_backend,
-        "optimization_level": 2,
+        "optimization_level": 3,
+        # "basis_gates": ["id", "rz", "sx", "x", "rzx", "cx", "reset"],
         "scheduling_method": "alap",
         "layout_method": "sabre",
         "routing_method": "sabre",

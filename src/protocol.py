@@ -11,13 +11,14 @@ from typing import Optional, Union, Any
 from qiskit import ClassicalRegister, QuantumRegister, QuantumCircuit, Aer  # type: ignore
 from qiskit.circuit.library import XGate  # type: ignore
 from qiskit.compiler import transpile  # type: ignore
+from qiskit.compiler.scheduler import schedule  # type: ignore
 from qiskit.transpiler import PassManager, InstructionDurations  # type: ignore
-from qiskit.transpiler.passes import ALAPSchedule, DynamicalDecoupling, RZXCalibrationBuilder  # type: ignore
+from qiskit.transpiler.passes import ALAPScheduleAnalysis, PadDynamicalDecoupling, RZXCalibrationBuilder  # type: ignore
 from qiskit.transpiler.basepasses import TransformationPass  # type: ignore
 from qiskit.dagcircuit import DAGCircuit  # type: ignore
 from qiskit.visualization.timeline import draw, IQXStandard  # type: ignore
 
-from protocol_gates import w, u, q  # type: ignore
+from protocol_gates import w, w_original, u, u_original, q  # type: ignore
 
 MAIN = __name__ == "__main__"
 
@@ -408,8 +409,8 @@ def dmera_reset_circuits(
             for _ in range(reset_count):
                 quantum_circuits[reset_idx].reset(inverse_maps[reset_idx][qubit])
     # Initialise the gates in the quantum circuit
-    gate_list = [w(theta_values[0]).to_gate()] + [
-        u(theta_values[layer_index]).to_gate() for layer_index in range(1, d)
+    gate_list = [w_original(theta_values[0]).to_gate()] + [
+        u_original(theta_values[layer_index]).to_gate() for layer_index in range(1, d)
     ]
     # Populate the quantum circuit with gates and reset
     for (layer_index, layer) in enumerate(pcc_circuit):
@@ -624,7 +625,7 @@ def device_operators(
     transpile_configs: int,
     transpile_kwargs: dict[str, Any],
     print_diagnostics: bool = False,
-    dynamically_decouple: bool = True,
+    dynamically_decouple: bool = False,
 ) -> list[float]:
     """
     Args:
@@ -642,30 +643,22 @@ def device_operators(
     backend = transpile_kwargs["backend"]
     trimmed_kwargs = deepcopy(transpile_kwargs)
     trimmed_kwargs.pop("layout_method", None)
+    trimmed_kwargs.pop("optimization_level", None)
     remove_delays = PassManager(RemoveDelays())
-    rzx_calibrate = PassManager(
-        RZXCalibrationBuilder(
-            backend.defaults().instruction_schedule_map,
-            backend.configuration().qubit_channel_mapping,
-        )
-    )
+    # rzx_calibrate = PassManager(
+    #     RZXCalibrationBuilder(
+    #         backend.defaults().instruction_schedule_map,
+    #         backend.configuration().qubit_channel_mapping,
+    #     )
+    # )
     # Set up the dynamical decoupling pass
     if dynamically_decouple:
         k = 8
         dd_sequence = [XGate()] * k
         dd_spacing = uhrig_pulse_spacing(k)
         instruction_durations = InstructionDurations.from_backend(backend)
-        dynamically_decouple = PassManager(
-            [
-                ALAPSchedule(instruction_durations),
-                DynamicalDecoupling(
-                    instruction_durations,
-                    dd_sequence,
-                    qubits=None,
-                    spacing=dd_spacing,
-                ),
-            ]
-        )  # type: ignore
+        alap_schedule = PassManager(ALAPScheduleAnalysis(instruction_durations))  # type: ignore
+        dynamically_decouple = PadDynamicalDecoupling(instruction_durations, dd_sequence, qubits=None, spacing=dd_spacing, skip_reset_qubits=True, pulse_alignment=backend.configuration().timing_constraints)  # type: ignore
     assert all(
         [len(circuit_list) == reset_configs for circuit_list in decomposed_circuits]
     )
@@ -673,10 +666,13 @@ def device_operators(
     best_circuits: list[QuantumCircuit] = []
     for circuit_list in decomposed_circuits:
         # Calibrate the circuits for R_ZX pulses
-        calibrated_list: list[QuantumCircuit] = rzx_calibrate.run(circuit_list)  # type: ignore
+        # calibrated_list: list[QuantumCircuit] = rzx_calibrate.run(circuit_list)  # type: ignore
         # Generate a large set of circuits
+        # trial_circuits: list[QuantumCircuit] = transpile(
+        #     calibrated_list * transpile_configs, **transpile_kwargs
+        # )  # type: ignore
         trial_circuits: list[QuantumCircuit] = transpile(
-            calibrated_list * transpile_configs, **transpile_kwargs
+            circuit_list * transpile_configs, **transpile_kwargs
         )  # type: ignore
         durations = [circuit.duration for circuit in trial_circuits]
         cx_counts = [len(circuit.get_instructions("cx")) for circuit in trial_circuits]
@@ -692,16 +688,20 @@ def device_operators(
         best_layout: tuple[list[int], str, float] = mm.best_overall_layout(deflated_circuit, backend)  # type: ignore
         # Re-transpile the circuit with the optimal layout and then dynamically decouple if appropriate
         if dynamically_decouple:
-            best_circuit: QuantumCircuit = dynamically_decouple.run(transpile(deflated_circuit, initial_layout=best_layout[0], **trimmed_kwargs))  # type: ignore
+            best_circuit: QuantumCircuit = dynamically_decouple.run(schedule(transpile(deflated_circuit, initial_layout=best_layout[0], **trimmed_kwargs), backend=backend))  # type: ignore
             if print_diagnostics:
                 # TODO: Fix this up when I've sorted out the RZXCalibrationBuilder
-                display(calibrated_list[0].draw("mpl"))  # type: ignore
-                display(trial_circuits[0].draw("mpl"))  # type: ignore
-                display(deflated_circuit.draw("mpl"))  # type: ignore
-                display(draw(best_circuit, style=IQXStandard(**{"formatter.general.fig_width": 40})))  # type: ignore
+                # display(calibrated_list[0].draw("mpl"))  # type: ignore
+                # display(trial_circuits[best_arg].draw("mpl"))  # type: ignore
+                # display(deflated_circuit.draw("mpl"))  # type: ignore
+                # display(draw(best_circuit, style=IQXStandard(**{"formatter.general.fig_width": 40})))  # type: ignore
+                pass
         else:
             best_circuit: QuantumCircuit = transpile(
-                deflated_circuit, initial_layout=best_layout[0], **trimmed_kwargs
+                deflated_circuit,
+                initial_layout=best_layout[0],
+                optimization_level=3,
+                **trimmed_kwargs,
             )  # type: ignore
         best_circuits.append(best_circuit)
     end_time = time()
